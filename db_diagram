@@ -1,0 +1,120 @@
+// Use DBML to define your database structure
+// 根據 ER Diagram 轉換，並新增了 Transaction 與 User 的直接關聯。
+
+// -----------------------------------------------------------
+// 實體: 使用者 (User)
+Table user {
+  user_id integer [pk] // 主鍵 (PK)
+  user_name varchar // 使用者名稱
+}
+
+// -----------------------------------------------------------
+// 實體: 備忘錄 (Memo)
+Table memo {
+  memo_id integer [pk] // 主鍵 (PK)
+  user_id integer [not null] // 外鍵 (FK): 創建者 (User Create Memo)
+  content text // 備忘錄內容
+  tags varchar // 標籤
+}
+
+// 關聯: User 創建 Memo (1:N)
+Ref user_memo: memo.user_id > user.user_id
+
+// -----------------------------------------------------------
+// 實體: 待辦事項 (Todo)
+Table todo {
+  todo_id integer [pk] // 主鍵 (PK)
+  user_id integer [not null] // 外鍵 (FK): 創建者 (User Create Todo)
+  title varchar // 標題
+  priority integer // 優先級
+  description text // 描述
+  due_time datetime // 預計完成時間
+  completed_at datetime // 完成時間
+  tags varchar // 標籤
+}
+
+// 關聯: User 創建 Todo (1:N)
+Ref user_todo: todo.user_id > user.user_id
+
+// -----------------------------------------------------------
+// 實體: 提醒事項 (Reminders)
+Table reminders {
+  reminders_id integer [pk] // 主鍵 (PK)
+  user_id integer [not null] // 外鍵 (FK): 設定者 (User Set Reminders)
+  enabled boolean // 是否啟用
+  recurrence_rule text // 重複規則
+  messages text // 訊息
+  remind_at datetime // 提醒時間
+  description text // 描述
+  tags varchar // 標籤
+}
+
+// 關聯: User 設定 Reminders (1:N)
+Ref user_reminders: reminders.user_id > user.user_id
+
+// -----------------------------------------------------------
+// 實體: 分類 (Category) 與 子分類 (Subcategory)
+Table category {
+  category_id integer [pk] // 主鍵 (PK)
+  user_id integer [not null] // 外鍵 (FK): 創建者 (User Create Category)
+  category_name varchar // 分類名稱
+  usage_count integer // 使用次數
+}
+
+// 關聯: User 創建 Category (1:N)
+Ref user_category: category.user_id > user.user_id
+
+Table subcategory {
+  subcategory_id integer [pk] // 主鍵 (PK)
+  category_id integer [not null] // 外鍵 (FK): 所屬主分類 (Category Has Subcategory)
+  subcategory_name varchar // 子分類名稱
+  usage_count integer // 使用次數
+}
+
+// 關聯: Category 包含 Subcategory (1:N)
+Ref category_subcategory: subcategory.category_id > category.category_id
+
+// -----------------------------------------------------------
+// 實體: 收支記錄 (Transaction)
+Table transacation {
+  transaction_id integer [pk] // 主鍵 (PK)
+  user_id integer [not null] // 外鍵 (FK): 記錄者 (新增：每筆交易都應有記錄者)
+  category_id integer [not null] // 外鍵 (FK): 所屬分類
+  type varchar // 類型 (e.g., 支出/收入)
+  amount decimal // 金額
+  description text // 描述
+  transaction_date date // 發生日期
+  tags varchar // 標籤
+  recurrence_rule text // 重複規則
+  frequency varchar // 頻率
+  interval integer // 間隔
+  by_day varchar // 星期幾
+  until date // 截止時間
+}
+
+// 關聯: Transaction 屬於 User (N:1)
+Ref user_transacation: transacation.user_id > user.user_id
+
+// 關聯: Transaction 屬於 Category (N:1)
+Ref transacation_category: transacation.category_id > category.category_id
+
+// -----------------------------------------------------------
+// 實體: 事件 (Event)
+Table event {
+  event_id integer [pk] // 主鍵 (PK)
+  user_id integer [not null] // 外鍵 (FK): 創建者 (User Create Event)
+  title varchar // 標題
+  description text // 描述
+  start_time datetime // 開始時間
+  end_time datetime // 結束時間
+  notification_minutes integer // 提醒時間 (分鐘)
+  recurrence_rule text // 重複規則
+  frequency varchar // 頻率
+  interval integer // 間隔
+  by_day varchar // 星期幾
+  until date // 截止時間
+  tags varchar // 標籤
+}
+
+// 關聯: User 創建 Event (1:N)
+Ref user_event: event.user_id > user.user_id
