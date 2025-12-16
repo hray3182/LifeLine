@@ -8,6 +8,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/hray3182/LifeLine/internal/models"
+	"github.com/hray3182/LifeLine/internal/rrule"
 )
 
 func (h *Handlers) handleReminder(ctx context.Context, msg *tgbotapi.Message) {
@@ -100,14 +101,42 @@ func parseTimeToday(timeStr string) (time.Time, error) {
 	return result, nil
 }
 
-func (h *Handlers) CreateReminder(ctx context.Context, userID int64, message string, remindAt *time.Time, recurrenceRule string) (*models.Reminder, error) {
+func (h *Handlers) CreateReminder(ctx context.Context, userID int64, message string, dtstart *time.Time, recurrenceRule string) (*models.Reminder, error) {
 	reminder := &models.Reminder{
 		UserID:         userID,
 		Enabled:        true,
 		Messages:       message,
-		RemindAt:       remindAt,
+		Dtstart:        dtstart,
 		RecurrenceRule: recurrenceRule,
 	}
+
+	// Calculate first remind_at time
+	if dtstart != nil {
+		if recurrenceRule != "" {
+			// For recurring reminders, calculate the first occurrence that is in the future
+			now := time.Now()
+			if dtstart.After(now) {
+				reminder.RemindAt = dtstart
+			} else {
+				// dtstart is in the past, find next occurrence
+				next, err := rrule.NextOccurrence(recurrenceRule, *dtstart, now)
+				if err != nil {
+					// Fallback to dtstart if RRULE parsing fails
+					reminder.RemindAt = dtstart
+				} else if next != nil {
+					reminder.RemindAt = next
+				} else {
+					// No more occurrences
+					reminder.RemindAt = nil
+					reminder.Enabled = false
+				}
+			}
+		} else {
+			// One-time reminder
+			reminder.RemindAt = dtstart
+		}
+	}
+
 	err := h.repos.Reminder.Create(ctx, reminder)
 	return reminder, err
 }

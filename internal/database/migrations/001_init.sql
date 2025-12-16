@@ -35,6 +35,7 @@ CREATE TABLE IF NOT EXISTS reminders (
     user_id BIGINT NOT NULL REFERENCES "user"(user_id) ON DELETE CASCADE,
     enabled BOOLEAN DEFAULT TRUE,
     recurrence_rule TEXT,
+    dtstart TIMESTAMP,
     messages TEXT,
     remind_at TIMESTAMP,
     description TEXT,
@@ -82,14 +83,11 @@ CREATE TABLE IF NOT EXISTS event (
     user_id BIGINT NOT NULL REFERENCES "user"(user_id) ON DELETE CASCADE,
     title VARCHAR(255),
     description TEXT,
-    start_time TIMESTAMP,
-    end_time TIMESTAMP,
+    dtstart TIMESTAMP,
+    duration INTEGER DEFAULT 60,
+    next_occurrence TIMESTAMP,
     notification_minutes INTEGER DEFAULT 30,
     recurrence_rule TEXT,
-    frequency VARCHAR(50),
-    interval INTEGER,
-    by_day VARCHAR(50),
-    until DATE,
     tags VARCHAR(255),
     created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
 );
@@ -104,4 +102,5 @@ CREATE INDEX IF NOT EXISTS idx_category_user_id ON category(user_id);
 CREATE INDEX IF NOT EXISTS idx_transaction_user_id ON transaction(user_id);
 CREATE INDEX IF NOT EXISTS idx_transaction_date ON transaction(transaction_date);
 CREATE INDEX IF NOT EXISTS idx_event_user_id ON event(user_id);
-CREATE INDEX IF NOT EXISTS idx_event_start_time ON event(start_time);
+CREATE INDEX IF NOT EXISTS idx_event_next_occurrence ON event(next_occurrence);
+CREATE INDEX IF NOT EXISTS idx_event_dtstart ON event(dtstart);

@@ -12,6 +12,7 @@ type Config struct {
 	AIAPIKey      string
 	AIBaseURL     string
 	AIModel       string
+	DevMode       bool
 }
 
 func Load() (*Config, error) {
@@ -25,6 +26,7 @@ func Load() (*Config, error) {
 		AIAPIKey:      os.Getenv("AI_API_KEY"),
 		AIBaseURL:     getEnvOrDefault("AI_BASE_URL", "https://openrouter.ai/api/v1"),
 		AIModel:       getEnvOrDefault("AI_MODEL", "openai/gpt-4o-mini"),
+		DevMode:       os.Getenv("DEV") == "true",
 	}, nil
 }
 

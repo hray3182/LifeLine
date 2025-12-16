@@ -28,6 +28,19 @@ func (c *Client) SetModel(model string) {
 	c.model = model
 }
 
+// ActionItem represents a single action in multi-action requests
+type ActionItem struct {
+	Action     string            `json:"action"`
+	Entity     string            `json:"entity"`
+	Parameters map[string]string `json:"parameters"`
+}
+
+// ConfirmationOption represents a choice for confirmation
+type ConfirmationOption struct {
+	Label      string            `json:"label"`      // Button text (e.g., "12/17", "12/18")
+	Parameters map[string]string `json:"parameters"` // Parameters to override when this option is chosen
+}
+
 type Intent struct {
 	Action             string            `json:"action"`
 	Entity             string            `json:"entity"`
@@ -40,6 +53,10 @@ type Intent struct {
 	FollowUpPrompt string `json:"follow_up_prompt"`
 	AIMessage      string `json:"ai_message"`
 	RawResponse    string `json:"-"`
+	// Multi-action support
+	Actions []ActionItem `json:"actions,omitempty"`
+	// Confirmation options (for ambiguous cases like date confirmation)
+	ConfirmationOptions []ConfirmationOption `json:"confirmation_options,omitempty"`
 }
 
 // Message represents a chat message for multi-turn conversations
@@ -78,33 +95,69 @@ const systemPromptTemplate = `你是 LifeLine 的智慧助理，負責解析用�
 根據 action 類型，parameters 可能包含：
 - id: 項目編號 (用於刪除、更新、完成操作)
 - keyword: 搜尋關鍵字 (用於 list_* 操作，搜尋標題、內容、描述、標籤)
-- content: 內容 (memo)
+- content: 內容 (memo, reminder)
 - title: 標題 (todo, event)
 - description: 描述
 - priority: 優先級 (1-5)
 - due_time: 截止時間 (格式: YYYY-MM-DD HH:MM)
-- remind_at: 提醒時間 (格式: YYYY-MM-DD HH:MM)
+- dtstart: 第一次發生時間 (格式: YYYY-MM-DD HH:MM)，用於 reminder 和 event
+- rrule: RFC 5545 重複規則 (用於 reminder 和 event 的重複設定)
 - amount: 金額
 - category: 分類
-- start_time: 開始時間 (格式: YYYY-MM-DD HH:MM)
-- end_time: 結束時間 (格式: YYYY-MM-DD HH:MM)
 - tags: 標籤
 
 重要規則：
-1. 當用戶使用相對時間（如「明天」、「下週一」、「3 小時後」），請根據當前時間計算出具體的日期時間，並以 YYYY-MM-DD HH:MM 格式輸出。
+1. 時間處理：
+   - 當用戶使用相對時間（如「明天」、「下週一」、「3 小時後」），請根據當前時間計算出具體的日期時間
+   - 輸出格式: YYYY-MM-DD HH:MM
+   - 重要：「明天」= 當前日期 + 1 天，「今天」= 當前日期
+   - 深夜特別規則 (00:00-05:59)：如果當前時間在凌晨，用戶說「明天晚上」很可能是指「今晚」（同一個日曆日），此時必須設定 needs_confirmation = true 並詢問確認具體日期
 
-2. 以下情況必須設定 needs_confirmation = true：
+2. RFC 5545 RRULE 重複規則（用於 create_reminder 和 create_event）：
+   - 格式: FREQ=頻率;其他參數
+   - 頻率 (FREQ): HOURLY, DAILY, WEEKLY, MONTHLY, YEARLY
+   - 間隔 (INTERVAL): 數字，如 INTERVAL=2 表示每 2 個週期
+   - 指定時間 (BYHOUR): 指定在哪些小時執行，如 BYHOUR=9,10,11,12
+   - 指定分鐘 (BYMINUTE): 指定在哪些分鐘執行
+   - 指定星期 (BYDAY): MO,TU,WE,TH,FR,SA,SU
+   - 指定日期 (BYMONTHDAY): 1-31
+   - 次數限制 (COUNT): 總共執行幾次
+   - 結束日期 (UNTIL): 格式 YYYYMMDDTHHMMSSZ
+
+   範例：
+   - 每天早上 9 點: dtstart="2024-01-01 09:00", rrule="FREQ=DAILY"
+   - 每小時（9點到22點）: dtstart="2024-01-01 09:00", rrule="FREQ=DAILY;BYHOUR=9,10,11,12,13,14,15,16,17,18,19,20,21,22"
+   - 每週一三五: dtstart="2024-01-01 09:00", rrule="FREQ=WEEKLY;BYDAY=MO,WE,FR"
+   - 每月 15 號: dtstart="2024-01-15 09:00", rrule="FREQ=MONTHLY;BYMONTHDAY=15"
+   - 每 2 小時: dtstart="2024-01-01 09:00", rrule="FREQ=HOURLY;INTERVAL=2"
+   - 一次性（不重複）: 只設定 dtstart，不設定 rrule
+
+   注意：
+   - 對於「每天從 X 點到 Y 點每小時」這類請求，使用 FREQ=DAILY;BYHOUR=X,X+1,...,Y
+   - 不要使用 end_time 來表示每天的結束時間，end_time 只用於事件的持續時間
+   - dtstart 是第一次發生的時間，也決定了每次發生的分鐘數
+
+3. 以下情況必須設定 needs_confirmation = true：
    - 刪除操作 (delete_*)：任何刪除都需要確認
    - 更新操作 (update_*)：任何更新都需要確認
-   - 時間模糊：深夜時段 (00:00-06:00) 用戶說「明天」，需確認是指今天還是隔天
+   - 深夜時間模糊：當前時間在 00:00-05:59 之間，且用戶提到「明天」、「今晚」、「晚上」等詞時，必須確認具體日期
    - 金額較大：支出或收入超過 10000 時需要確認
 
-3. confirmation_reason 應簡潔說明需要確認的原因，例如：
-   - "確認刪除待辦事項 #3？"
-   - "現在是凌晨 2 點，「明天」是指 12/17 還是 12/18？"
-   - "確認記錄支出 50000 元？"
+4. 確認選項 (confirmation_options)：
+   - 當需要用戶從多個選項中選擇時，使用 confirmation_options 提供按鈕選項
+   - 每個選項包含 label（按鈕文字）和 parameters（選擇後使用的參數）
+   - 範例：深夜時間模糊時
+     {
+       "ai_message": "現在是凌晨，「明天下午4點」是指哪一天？",
+       "needs_confirmation": true,
+       "confirmation_options": [
+         {"label": "12/17 (今天)", "parameters": {"dtstart": "2025-12-17 16:00"}},
+         {"label": "12/18 (明天)", "parameters": {"dtstart": "2025-12-18 16:00"}}
+       ]
+     }
+   - 刪除/更新操作的簡單確認不需要 confirmation_options，只需 ai_message 即可
 
-4. 多輪對話規則：
+5. 多輪對話規則：
    - 當用戶的請求資訊不足以執行操作時，設定 need_more_info = true
    - follow_up_prompt: 向用戶追問的問題（僅在 need_more_info = true 時設定）
    - ai_message: 給用戶的友善回覆訊息，可用於：
@@ -117,14 +170,36 @@ const systemPromptTemplate = `你是 LifeLine 的智慧助理，負責解析用�
    - 用戶說「記一筆花費」但沒有說金額 → 追問「請問花了多少錢？」
    - 用戶說「提醒我」但沒說時間和內容 → 追問「請問要提醒什麼？什麼時候提醒？」
 
-5. 當收到工具執行結果時，你需要：
+6. 當收到工具執行結果時，你需要：
    - 解讀結果並組織成友善的回覆
    - 如果結果需要用戶選擇（如搜尋到多筆記錄），引導用戶選擇
-   - 如果操作失敗，解釋原因並建議下一步`
+   - 如果操作失敗，解釋原因並建議下一步
+
+7. 多操作規則：
+   - 當用戶請求需要多個操作時（如「把待辦改成事件」、「刪除這個然後建立那個」），使用 actions 陣列
+   - actions 中的操作會依序執行，每個操作的結果會回傳給你
+   - 使用 actions 時，action 欄位應設為 "multi_action"
+   - 範例：用戶說「把待辦 #5 改成明天下午3點的事件」
+     {
+       "action": "multi_action",
+       "actions": [
+         {"action": "delete_todo", "entity": "todo", "parameters": {"id": "5"}},
+         {"action": "create_event", "entity": "event", "parameters": {"title": "原待辦標題", "start_time": "2024-01-01 15:00"}}
+       ],
+       "confidence": 0.9,
+       "needs_confirmation": true,
+       "confirmation_reason": "這將刪除待辦事項 #5 並創建新事件"
+     }`
 
 func getSystemPrompt() string {
 	now := time.Now()
-	return fmt.Sprintf(systemPromptTemplate, now.Format("2006-01-02 15:04 (Monday)"))
+	zone, offset := now.Zone()
+	offsetHours := offset / 3600
+	timeStr := fmt.Sprintf("%s (星期%s) [時區: %s, UTC%+d]",
+		now.Format("2006-01-02 15:04"),
+		[]string{"日", "一", "二", "三", "四", "五", "六"}[now.Weekday()],
+		zone, offsetHours)
+	return fmt.Sprintf(systemPromptTemplate, timeStr)
 }
 
 // JSON Schema for structured output
@@ -133,8 +208,8 @@ var intentSchema = json.RawMessage(`{
 	"properties": {
 		"action": {
 			"type": "string",
-			"enum": ["create_memo", "list_memo", "delete_memo", "create_todo", "list_todo", "complete_todo", "delete_todo", "update_todo", "create_reminder", "list_reminder", "delete_reminder", "create_expense", "create_income", "list_transaction", "delete_transaction", "get_balance", "create_event", "list_event", "delete_event", "update_event", "unknown"],
-			"description": "The action to perform"
+			"enum": ["create_memo", "list_memo", "delete_memo", "create_todo", "list_todo", "complete_todo", "delete_todo", "update_todo", "create_reminder", "list_reminder", "delete_reminder", "create_expense", "create_income", "list_transaction", "delete_transaction", "get_balance", "create_event", "list_event", "delete_event", "update_event", "multi_action", "unknown"],
+			"description": "The action to perform. Use multi_action when multiple operations are needed."
 		},
 		"entity": {
 			"type": "string",
@@ -172,6 +247,54 @@ var intentSchema = json.RawMessage(`{
 		"ai_message": {
 			"type": "string",
 			"description": "Friendly message to show user (for asking questions, confirming actions, or casual chat)"
+		},
+		"confirmation_options": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"label": {
+						"type": "string",
+						"description": "Button text to display (e.g., '12/17', '12/18')"
+					},
+					"parameters": {
+						"type": "object",
+						"additionalProperties": {
+							"type": "string"
+						},
+						"description": "Parameters to use when this option is selected"
+					}
+				},
+				"required": ["label", "parameters"],
+				"additionalProperties": false
+			},
+			"description": "Options for user to choose from when confirmation is needed (e.g., date options). Always include a cancel option."
+		},
+		"actions": {
+			"type": "array",
+			"items": {
+				"type": "object",
+				"properties": {
+					"action": {
+						"type": "string",
+						"description": "The action to perform"
+					},
+					"entity": {
+						"type": "string",
+						"description": "The entity type"
+					},
+					"parameters": {
+						"type": "object",
+						"additionalProperties": {
+							"type": "string"
+						},
+						"description": "Parameters for this action"
+					}
+				},
+				"required": ["action"],
+				"additionalProperties": false
+			},
+			"description": "Array of actions to execute sequentially when action is multi_action"
 		}
 	},
 	"required": ["action", "confidence", "needs_confirmation", "need_more_info"],

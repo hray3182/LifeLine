@@ -74,7 +74,10 @@ func main() {
 	go sched.Start(ctx)
 
 	// Create and start bot
-	b, err := bot.New(cfg.TelegramToken, db, aiClient)
+	if cfg.DevMode {
+		log.Println("[DEV] Development mode enabled")
+	}
+	b, err := bot.New(cfg.TelegramToken, db, aiClient, cfg.DevMode)
 	if err != nil {
 		log.Fatalf("Failed to create bot: %v", err)
 	}

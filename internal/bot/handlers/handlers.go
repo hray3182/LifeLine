@@ -4,6 +4,9 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"strconv"
+	"strings"
+	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/hray3182/LifeLine/internal/ai"
@@ -21,16 +24,18 @@ type Repositories struct {
 }
 
 type Handlers struct {
-	api   *tgbotapi.BotAPI
-	repos *Repositories
-	ai    *ai.Client
+	api     *tgbotapi.BotAPI
+	repos   *Repositories
+	ai      *ai.Client
+	devMode bool
 }
 
-func New(api *tgbotapi.BotAPI, repos *Repositories, aiClient *ai.Client) *Handlers {
+func New(api *tgbotapi.BotAPI, repos *Repositories, aiClient *ai.Client, devMode bool) *Handlers {
 	return &Handlers{
-		api:   api,
-		repos: repos,
-		ai:    aiClient,
+		api:     api,
+		repos:   repos,
+		ai:      aiClient,
+		devMode: devMode,
 	}
 }
 
@@ -86,6 +91,100 @@ func (h *Handlers) HandleMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 	// Process with AI
 	h.handleAIMessage(ctx, msg)
+}
+
+func (h *Handlers) HandleCallbackQuery(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	// Answer callback to remove loading state
+	answer := tgbotapi.NewCallback(callback.ID, "")
+	if _, err := h.api.Request(answer); err != nil {
+		log.Printf("Failed to answer callback: %v", err)
+	}
+
+	// Parse callback data: "confirm:userID", "cancel:userID", or "option:userID:index"
+	parts := strings.Split(callback.Data, ":")
+	if len(parts) < 2 {
+		return
+	}
+
+	action := parts[0]
+	userID, err := strconv.ParseInt(parts[1], 10, 64)
+	if err != nil {
+		return
+	}
+
+	// Verify the callback is from the correct user
+	if callback.From.ID != userID {
+		h.answerCallbackWithAlert(callback.ID, "這不是你的操作")
+		return
+	}
+
+	// Get pending confirmation
+	pendingMutex.RLock()
+	pending, exists := pendingConfirmations[userID]
+	pendingMutex.RUnlock()
+
+	if !exists || time.Now().After(pending.ExpiresAt) {
+		if exists {
+			pendingMutex.Lock()
+			delete(pendingConfirmations, userID)
+			pendingMutex.Unlock()
+		}
+		h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, "⏰ 確認已過期")
+		return
+	}
+
+	// Clear pending
+	pendingMutex.Lock()
+	delete(pendingConfirmations, userID)
+	pendingMutex.Unlock()
+
+	// Create a fake message for executeIntent
+	fakeMsg := &tgbotapi.Message{
+		Chat: callback.Message.Chat,
+		From: callback.From,
+	}
+
+	switch action {
+	case "confirm":
+		result := h.executeIntentWithResult(ctx, fakeMsg, pending.Intent)
+		h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, "✅ 已確認\n\n"+result)
+	case "cancel":
+		h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, "❌ 已取消操作")
+	case "option":
+		// Parse option index
+		if len(parts) != 3 {
+			return
+		}
+		optionIndex, err := strconv.Atoi(parts[2])
+		if err != nil || optionIndex < 0 || optionIndex >= len(pending.Intent.ConfirmationOptions) {
+			h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, "❌ 無效的選項")
+			return
+		}
+
+		// Get selected option and merge parameters
+		selectedOption := pending.Intent.ConfirmationOptions[optionIndex]
+		for key, value := range selectedOption.Parameters {
+			pending.Intent.Parameters[key] = value
+		}
+
+		result := h.executeIntentWithResult(ctx, fakeMsg, pending.Intent)
+		h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, fmt.Sprintf("✅ 已選擇「%s」\n\n%s", selectedOption.Label, result))
+	}
+}
+
+func (h *Handlers) answerCallbackWithAlert(callbackID string, text string) {
+	answer := tgbotapi.NewCallbackWithAlert(callbackID, text)
+	if _, err := h.api.Request(answer); err != nil {
+		log.Printf("Failed to answer callback with alert: %v", err)
+	}
+}
+
+func (h *Handlers) editMessageText(chatID int64, messageID int, text string) {
+	edit := tgbotapi.NewEditMessageText(chatID, messageID, text)
+	edit.ParseMode = "Markdown"
+	if _, err := h.api.Send(edit); err != nil {
+		log.Printf("Failed to edit message: %v", err)
+	}
 }
 
 func (h *Handlers) sendMessage(chatID int64, text string) {

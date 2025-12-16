@@ -2,7 +2,6 @@ package handlers
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"log"
 	"strconv"
@@ -13,6 +12,7 @@ import (
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/hray3182/LifeLine/internal/ai"
 	"github.com/hray3182/LifeLine/internal/models"
+	"github.com/hray3182/LifeLine/internal/rrule"
 )
 
 // PendingConfirmation stores intent waiting for user confirmation
@@ -46,6 +46,15 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	// DEV mode: log incoming message
+	if h.devMode {
+		log.Printf("[DEV] Incoming message from %s (@%s): %s",
+			msg.From.FirstName, msg.From.UserName, msg.Text)
+		if msg.ReplyToMessage != nil {
+			log.Printf("[DEV] ReplyToMessage: %s", msg.ReplyToMessage.Text)
+		}
+	}
+
 	// Check if user is confirming a pending action
 	if h.handleConfirmationResponse(ctx, msg) {
 		return
@@ -53,6 +62,20 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 
 	// Get or create conversation session
 	session := h.getOrCreateSession(msg.From.ID)
+
+	// If user is replying to a message, add it as context
+	if msg.ReplyToMessage != nil && msg.ReplyToMessage.Text != "" {
+		// Check if the replied message is from the bot (our previous response)
+		if msg.ReplyToMessage.From != nil && msg.ReplyToMessage.From.IsBot {
+			session.History = append(session.History, ai.Message{
+				Role:    "assistant",
+				Content: msg.ReplyToMessage.Text,
+			})
+			if h.devMode {
+				log.Printf("[DEV] Added ReplyToMessage to context as assistant message")
+			}
+		}
+	}
 
 	// Add user message to history
 	session.History = append(session.History, ai.Message{
@@ -65,6 +88,14 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 		session.History = session.History[len(session.History)-maxHistoryLen:]
 	}
 
+	// DEV mode: log conversation history
+	if h.devMode {
+		log.Printf("[DEV] Conversation history (%d messages):", len(session.History))
+		for i, m := range session.History {
+			log.Printf("[DEV]   [%d] %s: %s", i, m.Role, truncateString(m.Content, 100))
+		}
+	}
+
 	// Parse intent with conversation history
 	intent, err := h.ai.ParseIntentWithHistory(ctx, session.History)
 	if err != nil {
@@ -73,8 +104,19 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	log.Printf("Parsed intent: action=%s, entity=%s, confidence=%.2f, needs_confirmation=%v, need_more_info=%v",
-		intent.Action, intent.Entity, intent.Confidence, intent.NeedsConfirmation, intent.NeedMoreInfo)
+	// DEV mode: log parsed intent
+	if h.devMode {
+		log.Printf("[DEV] Parsed intent: action=%s, entity=%s, confidence=%.2f, needs_confirmation=%v, need_more_info=%v",
+			intent.Action, intent.Entity, intent.Confidence, intent.NeedsConfirmation, intent.NeedMoreInfo)
+		log.Printf("[DEV] Parameters: %v", intent.Parameters)
+		if intent.AIMessage != "" {
+			log.Printf("[DEV] AI Message: %s", intent.AIMessage)
+		}
+		log.Printf("[DEV] Raw response: %s", intent.RawResponse)
+	} else {
+		log.Printf("Parsed intent: action=%s, entity=%s, confidence=%.2f, needs_confirmation=%v, need_more_info=%v",
+			intent.Action, intent.Entity, intent.Confidence, intent.NeedsConfirmation, intent.NeedMoreInfo)
+	}
 
 	// Handle low confidence
 	if intent.Confidence < 0.5 {
@@ -217,24 +259,63 @@ func (h *Handlers) requestConfirmation(chatID int64, userID int64, intent *ai.In
 	}
 	pendingMutex.Unlock()
 
-	// Build confirmation message
+	// Build confirmation message - prefer ai_message, fallback to confirmation_reason
 	var confirmMsg string
-	if intent.ConfirmationReason != "" {
-		confirmMsg = fmt.Sprintf("⚠️ *需要確認*\n\n%s\n\n", intent.ConfirmationReason)
+	if intent.AIMessage != "" {
+		confirmMsg = intent.AIMessage
+	} else if intent.ConfirmationReason != "" {
+		confirmMsg = intent.ConfirmationReason
 	} else {
-		confirmMsg = fmt.Sprintf("⚠️ *需要確認*\n\n確認執行 %s 操作？\n\n", intent.Action)
+		confirmMsg = fmt.Sprintf("確認執行 %s 操作？", intent.Action)
 	}
 
-	// Show action details
-	if len(intent.Parameters) > 0 {
-		confirmMsg += "*操作詳情:*\n"
-		paramsJSON, _ := json.MarshalIndent(intent.Parameters, "", "  ")
-		confirmMsg += "```\n" + string(paramsJSON) + "\n```\n\n"
+	// Create inline keyboard
+	var keyboard tgbotapi.InlineKeyboardMarkup
+	if len(intent.ConfirmationOptions) > 0 {
+		// Use custom options from AI
+		var buttons []tgbotapi.InlineKeyboardButton
+		for i, opt := range intent.ConfirmationOptions {
+			// callback data format: "option:<userID>:<index>"
+			callbackData := fmt.Sprintf("option:%d:%d", userID, i)
+			buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData(opt.Label, callbackData))
+		}
+		// Add cancel button
+		buttons = append(buttons, tgbotapi.NewInlineKeyboardButtonData("❌ 取消", fmt.Sprintf("cancel:%d", userID)))
+
+		// Split into rows of 2-3 buttons
+		var rows [][]tgbotapi.InlineKeyboardButton
+		for i := 0; i < len(buttons); i += 2 {
+			end := i + 2
+			if end > len(buttons) {
+				end = len(buttons)
+			}
+			rows = append(rows, buttons[i:end])
+		}
+		keyboard = tgbotapi.NewInlineKeyboardMarkup(rows...)
+	} else {
+		// Default confirm/cancel buttons
+		keyboard = tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(
+				tgbotapi.NewInlineKeyboardButtonData("✅ 確認", fmt.Sprintf("confirm:%d", userID)),
+				tgbotapi.NewInlineKeyboardButtonData("❌ 取消", fmt.Sprintf("cancel:%d", userID)),
+			),
+		)
 	}
 
-	confirmMsg += "回覆「*是*」確認，或「*否*」取消"
+	msg := tgbotapi.NewMessage(chatID, confirmMsg)
+	msg.ReplyMarkup = keyboard
 
-	h.sendMessage(chatID, confirmMsg)
+	if _, err := h.api.Send(msg); err != nil {
+		log.Printf("Failed to send confirmation message: %v", err)
+	}
+}
+
+// escapeHTML escapes special HTML characters
+func escapeHTML(s string) string {
+	s = strings.ReplaceAll(s, "&", "&amp;")
+	s = strings.ReplaceAll(s, "<", "&lt;")
+	s = strings.ReplaceAll(s, ">", "&gt;")
+	return s
 }
 
 // executeIntent is kept for confirmation flow compatibility
@@ -244,60 +325,76 @@ func (h *Handlers) executeIntent(ctx context.Context, msg *tgbotapi.Message, int
 
 // executeIntentWithResult executes the intent and returns the result message
 func (h *Handlers) executeIntentWithResult(ctx context.Context, msg *tgbotapi.Message, intent *ai.Intent) string {
+	// Handle multi-action
+	if intent.Action == "multi_action" && len(intent.Actions) > 0 {
+		var results []string
+		for i, action := range intent.Actions {
+			result := h.executeSingleAction(ctx, msg, action.Action, action.Parameters, false)
+			results = append(results, fmt.Sprintf("[%d] %s: %s", i+1, action.Action, result))
+		}
+		combinedResult := strings.Join(results, "\n")
+		h.sendMessage(msg.Chat.ID, combinedResult)
+		return combinedResult
+	}
+
+	// Single action (backward compatible)
+	return h.executeSingleAction(ctx, msg, intent.Action, intent.Parameters, true)
+}
+
+// executeSingleAction executes a single action and returns the result
+func (h *Handlers) executeSingleAction(ctx context.Context, msg *tgbotapi.Message, action string, params map[string]string, sendMsg bool) string {
 	var result string
-	switch intent.Action {
+	switch action {
 	case "create_memo":
-		result = h.handleAICreateMemo(ctx, msg, intent.Parameters)
+		result = h.handleAICreateMemoResult(ctx, msg, params, sendMsg)
 	case "list_memo":
-		result = h.handleAIListMemo(ctx, msg, intent.Parameters)
+		result = h.handleAIListMemoResult(ctx, msg, params, sendMsg)
 	case "delete_memo":
-		result = h.handleAIDeleteMemo(ctx, msg, intent.Parameters)
+		result = h.handleAIDeleteMemoResult(ctx, msg, params, sendMsg)
 	case "create_todo":
-		result = h.handleAICreateTodo(ctx, msg, intent.Parameters)
+		result = h.handleAICreateTodoResult(ctx, msg, params, sendMsg)
 	case "list_todo":
-		result = h.handleAIListTodo(ctx, msg, intent.Parameters)
+		result = h.handleAIListTodoResult(ctx, msg, params, sendMsg)
 	case "complete_todo":
-		result = h.handleAICompleteTodo(ctx, msg, intent.Parameters)
+		result = h.handleAICompleteTodoResult(ctx, msg, params, sendMsg)
 	case "delete_todo":
-		result = h.handleAIDeleteTodo(ctx, msg, intent.Parameters)
+		result = h.handleAIDeleteTodoResult(ctx, msg, params, sendMsg)
 	case "update_todo":
-		result = h.handleAIUpdateTodo(ctx, msg, intent.Parameters)
+		result = h.handleAIUpdateTodoResult(ctx, msg, params, sendMsg)
 	case "create_reminder":
-		result = h.handleAICreateReminder(ctx, msg, intent.Parameters)
+		result = h.handleAICreateReminderResult(ctx, msg, params, sendMsg)
 	case "list_reminder":
-		result = h.handleAIListReminder(ctx, msg, intent.Parameters)
+		result = h.handleAIListReminderResult(ctx, msg, params, sendMsg)
 	case "delete_reminder":
-		result = h.handleAIDeleteReminder(ctx, msg, intent.Parameters)
+		result = h.handleAIDeleteReminderResult(ctx, msg, params, sendMsg)
 	case "create_expense":
-		result = h.handleAICreateTransaction(ctx, msg, intent.Parameters, models.TransactionTypeExpense)
+		result = h.handleAICreateTransactionResult(ctx, msg, params, models.TransactionTypeExpense, sendMsg)
 	case "create_income":
-		result = h.handleAICreateTransaction(ctx, msg, intent.Parameters, models.TransactionTypeIncome)
+		result = h.handleAICreateTransactionResult(ctx, msg, params, models.TransactionTypeIncome, sendMsg)
 	case "list_transaction":
-		result = h.handleAIListTransaction(ctx, msg, intent.Parameters)
+		result = h.handleAIListTransactionResult(ctx, msg, params, sendMsg)
 	case "delete_transaction":
-		result = h.handleAIDeleteTransaction(ctx, msg, intent.Parameters)
+		result = h.handleAIDeleteTransactionResult(ctx, msg, params, sendMsg)
 	case "get_balance":
 		result = h.handleBalanceWithResult(ctx, msg)
 	case "create_event":
-		result = h.handleAICreateEvent(ctx, msg, intent.Parameters)
+		result = h.handleAICreateEventResult(ctx, msg, params, sendMsg)
 	case "list_event":
-		result = h.handleAIListEvent(ctx, msg, intent.Parameters)
+		result = h.handleAIListEventResult(ctx, msg, params, sendMsg)
 	case "delete_event":
-		result = h.handleAIDeleteEvent(ctx, msg, intent.Parameters)
+		result = h.handleAIDeleteEventResult(ctx, msg, params, sendMsg)
 	case "update_event":
-		result = h.handleAIUpdateEvent(ctx, msg, intent.Parameters)
+		result = h.handleAIUpdateEventResult(ctx, msg, params, sendMsg)
 	case "unknown":
-		// Handle unknown/chat with AI message
-		if intent.AIMessage != "" {
-			result = intent.AIMessage
-			h.sendMessage(msg.Chat.ID, result)
-		} else {
-			result = "抱歉，我不確定你想做什麼。請使用 /help 查看可用指令。"
+		result = "無法識別的操作"
+		if sendMsg {
 			h.sendMessage(msg.Chat.ID, result)
 		}
 	default:
 		result = "抱歉，我不確定你想做什麼。請使用 /help 查看可用指令。"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 	}
 	return result
 }
@@ -305,6 +402,10 @@ func (h *Handlers) executeIntentWithResult(ctx context.Context, msg *tgbotapi.Me
 // List handlers with keyword search
 
 func (h *Handlers) handleAIListMemo(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIListMemoResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIListMemoResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	keyword := params["keyword"]
 	var memos []*models.Memo
 	var err error
@@ -317,42 +418,52 @@ func (h *Handlers) handleAIListMemo(ctx context.Context, msg *tgbotapi.Message, 
 
 	if err != nil {
 		result := "取得備忘錄失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if len(memos) == 0 {
 		var result string
 		if keyword != "" {
-			result = fmt.Sprintf("📝 找不到包含「%s」的備忘錄", keyword)
+			result = fmt.Sprintf("找不到包含「%s」的備忘錄", keyword)
 		} else {
-			result = "📝 目前沒有備忘錄"
+			result = "目前沒有備忘錄"
 		}
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	var sb strings.Builder
 	if keyword != "" {
-		sb.WriteString(fmt.Sprintf("📝 *備忘錄搜尋結果* (關鍵字: %s)\n\n", keyword))
+		sb.WriteString(fmt.Sprintf("備忘錄搜尋結果 (關鍵字: %s)\n\n", keyword))
 	} else {
-		sb.WriteString("📝 *備忘錄列表*\n\n")
+		sb.WriteString("備忘錄列表\n\n")
 	}
 	for _, memo := range memos {
 		content := memo.Content
 		if len(content) > 50 {
 			content = content[:50] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("*%d.* %s\n", memo.MemoID, content))
-		sb.WriteString(fmt.Sprintf("   _建立於 %s_\n\n", memo.CreatedAt.Format("2006-01-02 15:04")))
+		sb.WriteString(fmt.Sprintf("%d. %s\n", memo.MemoID, content))
+		sb.WriteString(fmt.Sprintf("   建立於 %s\n\n", memo.CreatedAt.Format("2006-01-02 15:04")))
 	}
 
 	result := sb.String()
-	h.sendMessage(msg.Chat.ID, result)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIListTodo(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIListTodoResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIListTodoResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	keyword := params["keyword"]
 	var todos []*models.Todo
 	var err error
@@ -365,31 +476,35 @@ func (h *Handlers) handleAIListTodo(ctx context.Context, msg *tgbotapi.Message, 
 
 	if err != nil {
 		result := "取得待辦事項失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if len(todos) == 0 {
 		var result string
 		if keyword != "" {
-			result = fmt.Sprintf("📋 找不到包含「%s」的待辦事項", keyword)
+			result = fmt.Sprintf("找不到包含「%s」的待辦事項", keyword)
 		} else {
-			result = "✅ 目前沒有待辦事項"
+			result = "目前沒有待辦事項"
 		}
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	var sb strings.Builder
 	if keyword != "" {
-		sb.WriteString(fmt.Sprintf("📋 *待辦事項搜尋結果* (關鍵字: %s)\n\n", keyword))
+		sb.WriteString(fmt.Sprintf("待辦事項搜尋結果 (關鍵字: %s)\n\n", keyword))
 	} else {
-		sb.WriteString("📋 *待辦事項列表*\n\n")
+		sb.WriteString("待辦事項列表\n\n")
 	}
 	for _, todo := range todos {
-		status := "⬜"
+		status := "[ ]"
 		if todo.IsCompleted() {
-			status = "✅"
+			status = "[x]"
 		}
 
 		title := todo.Title
@@ -397,9 +512,9 @@ func (h *Handlers) handleAIListTodo(ctx context.Context, msg *tgbotapi.Message, 
 			title = title[:40] + "..."
 		}
 
-		sb.WriteString(fmt.Sprintf("%s *%d.* %s", status, todo.TodoID, title))
+		sb.WriteString(fmt.Sprintf("%s %d. %s", status, todo.TodoID, title))
 		if todo.DueTime != nil {
-			sb.WriteString(fmt.Sprintf("\n   📅 %s", todo.DueTime.Format("2006-01-02 15:04")))
+			sb.WriteString(fmt.Sprintf("\n   截止: %s", todo.DueTime.Format("2006-01-02 15:04")))
 		}
 		if todo.Priority > 0 {
 			sb.WriteString(fmt.Sprintf(" | 優先級: %d", todo.Priority))
@@ -408,11 +523,17 @@ func (h *Handlers) handleAIListTodo(ctx context.Context, msg *tgbotapi.Message, 
 	}
 
 	result := sb.String()
-	h.sendMessage(msg.Chat.ID, result)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIListReminder(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIListReminderResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIListReminderResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	keyword := params["keyword"]
 	var reminders []*models.Reminder
 	var err error
@@ -425,31 +546,35 @@ func (h *Handlers) handleAIListReminder(ctx context.Context, msg *tgbotapi.Messa
 
 	if err != nil {
 		result := "取得提醒列表失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if len(reminders) == 0 {
 		var result string
 		if keyword != "" {
-			result = fmt.Sprintf("⏰ 找不到包含「%s」的提醒", keyword)
+			result = fmt.Sprintf("找不到包含「%s」的提醒", keyword)
 		} else {
-			result = "⏰ 目前沒有提醒"
+			result = "目前沒有提醒"
 		}
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	var sb strings.Builder
 	if keyword != "" {
-		sb.WriteString(fmt.Sprintf("⏰ *提醒搜尋結果* (關鍵字: %s)\n\n", keyword))
+		sb.WriteString(fmt.Sprintf("提醒搜尋結果 (關鍵字: %s)\n\n", keyword))
 	} else {
-		sb.WriteString("⏰ *提醒列表*\n\n")
+		sb.WriteString("提醒列表\n\n")
 	}
 	for _, r := range reminders {
-		status := "✅"
+		status := "啟用"
 		if !r.Enabled {
-			status = "❌"
+			status = "停用"
 		}
 
 		timeStr := "未設定"
@@ -457,16 +582,22 @@ func (h *Handlers) handleAIListReminder(ctx context.Context, msg *tgbotapi.Messa
 			timeStr = r.RemindAt.Format("2006-01-02 15:04")
 		}
 
-		sb.WriteString(fmt.Sprintf("%s *%d.* %s\n", status, r.ReminderID, r.Messages))
-		sb.WriteString(fmt.Sprintf("   📅 %s\n\n", timeStr))
+		sb.WriteString(fmt.Sprintf("[%s] %d. %s\n", status, r.ReminderID, r.Messages))
+		sb.WriteString(fmt.Sprintf("   時間: %s\n\n", timeStr))
 	}
 
 	result := sb.String()
-	h.sendMessage(msg.Chat.ID, result)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIListTransaction(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIListTransactionResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIListTransactionResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	keyword := params["keyword"]
 	var transactions []*models.Transaction
 	var err error
@@ -479,31 +610,35 @@ func (h *Handlers) handleAIListTransaction(ctx context.Context, msg *tgbotapi.Me
 
 	if err != nil {
 		result := "取得交易記錄失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if len(transactions) == 0 {
 		var result string
 		if keyword != "" {
-			result = fmt.Sprintf("💰 找不到包含「%s」的交易記錄", keyword)
+			result = fmt.Sprintf("找不到包含「%s」的交易記錄", keyword)
 		} else {
-			result = "💰 目前沒有交易記錄"
+			result = "目前沒有交易記錄"
 		}
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	var sb strings.Builder
 	if keyword != "" {
-		sb.WriteString(fmt.Sprintf("💰 *交易記錄搜尋結果* (關鍵字: %s)\n\n", keyword))
+		sb.WriteString(fmt.Sprintf("交易記錄搜尋結果 (關鍵字: %s)\n\n", keyword))
 	} else {
-		sb.WriteString("💰 *交易記錄*\n\n")
+		sb.WriteString("交易記錄\n\n")
 	}
 	for _, tx := range transactions {
-		emoji := "💸"
+		typeStr := "支出"
 		if tx.Type == models.TransactionTypeIncome {
-			emoji = "💰"
+			typeStr = "收入"
 		}
 
 		dateStr := ""
@@ -511,7 +646,7 @@ func (h *Handlers) handleAIListTransaction(ctx context.Context, msg *tgbotapi.Me
 			dateStr = tx.TransactionDate.Format("01/02")
 		}
 
-		sb.WriteString(fmt.Sprintf("%s *%d.* %.2f", emoji, tx.TransactionID, tx.Amount))
+		sb.WriteString(fmt.Sprintf("[%s] %d. %.2f", typeStr, tx.TransactionID, tx.Amount))
 		if tx.Description != "" {
 			desc := tx.Description
 			if len(desc) > 20 {
@@ -526,11 +661,17 @@ func (h *Handlers) handleAIListTransaction(ctx context.Context, msg *tgbotapi.Me
 	}
 
 	result := sb.String()
-	h.sendMessage(msg.Chat.ID, result)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIListEvent(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIListEventResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIListEventResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	keyword := params["keyword"]
 	var events []*models.Event
 	var err error
@@ -543,53 +684,71 @@ func (h *Handlers) handleAIListEvent(ctx context.Context, msg *tgbotapi.Message,
 
 	if err != nil {
 		result := "取得事件列表失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if len(events) == 0 {
 		var result string
 		if keyword != "" {
-			result = fmt.Sprintf("📅 找不到包含「%s」的事件", keyword)
+			result = fmt.Sprintf("找不到包含「%s」的事件", keyword)
 		} else {
-			result = "📅 目前沒有事件"
+			result = "目前沒有事件"
 		}
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	var sb strings.Builder
 	if keyword != "" {
-		sb.WriteString(fmt.Sprintf("📅 *事件搜尋結果* (關鍵字: %s)\n\n", keyword))
+		sb.WriteString(fmt.Sprintf("事件搜尋結果 (關鍵字: %s)\n\n", keyword))
 	} else {
-		sb.WriteString("📅 *事件列表*\n\n")
+		sb.WriteString("事件列表\n\n")
 	}
 	for _, event := range events {
 		timeStr := "未設定時間"
-		if event.StartTime != nil {
-			timeStr = event.StartTime.Format("01/02 15:04")
+		if event.NextOccurrence != nil {
+			timeStr = event.NextOccurrence.Format("01/02 15:04")
+		} else if event.Dtstart != nil {
+			timeStr = event.Dtstart.Format("01/02 15:04")
 		}
 
-		sb.WriteString(fmt.Sprintf("*%d.* %s\n", event.EventID, event.Title))
-		sb.WriteString(fmt.Sprintf("   🕐 %s\n", timeStr))
+		sb.WriteString(fmt.Sprintf("%d. %s\n", event.EventID, event.Title))
+		sb.WriteString(fmt.Sprintf("   時間: %s\n", timeStr))
+		if event.Duration > 0 {
+			sb.WriteString(fmt.Sprintf("   時長: %d 分鐘\n", event.Duration))
+		}
+		if event.IsRecurring() {
+			sb.WriteString(fmt.Sprintf("   重複: %s\n", rrule.HumanReadableChinese(event.RecurrenceRule)))
+		}
 		if event.Description != "" {
 			desc := event.Description
 			if len(desc) > 30 {
 				desc = desc[:30] + "..."
 			}
-			sb.WriteString(fmt.Sprintf("   📝 %s\n", desc))
+			sb.WriteString(fmt.Sprintf("   描述: %s\n", desc))
 		}
 		sb.WriteString("\n")
 	}
 
 	result := sb.String()
-	h.sendMessage(msg.Chat.ID, result)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 // Create handlers
 
 func (h *Handlers) handleAICreateMemo(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAICreateMemoResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAICreateMemoResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	content := params["content"]
 	if content == "" {
 		content = msg.Text
@@ -599,20 +758,30 @@ func (h *Handlers) handleAICreateMemo(ctx context.Context, msg *tgbotapi.Message
 	memo, err := h.CreateMemo(ctx, msg.From.ID, content, tags)
 	if err != nil {
 		result := "建立備忘錄失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("📝 備忘錄已建立 (ID: %d)\n內容: %s", memo.MemoID, content)
-	h.sendMessage(msg.Chat.ID, result)
+	result := fmt.Sprintf("備忘錄已建立 (ID: %d)\n內容: %s", memo.MemoID, content)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAICreateTodo(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAICreateTodoResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAICreateTodoResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	title := params["title"]
 	if title == "" {
 		result := "請提供待辦事項標題"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
@@ -635,92 +804,139 @@ func (h *Handlers) handleAICreateTodo(ctx context.Context, msg *tgbotapi.Message
 	todo, err := h.CreateTodo(ctx, msg.From.ID, title, description, priority, dueTime, tags)
 	if err != nil {
 		result := "建立待辦事項失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("✅ 待辦事項已建立 (ID: %d)\n標題: %s", todo.TodoID, title)
+	result := fmt.Sprintf("待辦事項已建立 (ID: %d)\n標題: %s", todo.TodoID, title)
 	if dueTime != nil {
 		result += fmt.Sprintf("\n截止時間: %s", dueTime.Format("2006-01-02 15:04"))
 	}
-	h.sendMessage(msg.Chat.ID, result)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAICompleteTodo(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAICompleteTodoResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAICompleteTodoResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	idStr := params["id"]
 	if idStr == "" {
 		result := "請提供待辦事項編號"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	todoID, err := strconv.Atoi(idStr)
 	if err != nil {
 		result := "無效的編號"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if err := h.repos.Todo.Complete(ctx, todoID, msg.From.ID); err != nil {
 		result := "完成待辦事項失敗，請確認編號是否正確"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("✅ 待辦事項 #%d 已完成！", todoID)
-	h.sendMessage(msg.Chat.ID, result)
+	result := fmt.Sprintf("待辦事項 #%d 已完成", todoID)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAICreateReminder(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAICreateReminderResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAICreateReminderResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	message := params["message"]
 	if message == "" {
 		message = params["content"]
 	}
 	if message == "" {
 		result := "請提供提醒訊息"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	var remindAt *time.Time
-	if dt, ok := params["remind_at"]; ok && dt != "" {
-		remindAt = parseDateTime(dt)
+	// Parse dtstart (first occurrence time)
+	var dtstart *time.Time
+	if dt, ok := params["dtstart"]; ok && dt != "" {
+		dtstart = parseDateTime(dt)
 	}
-	if remindAt == nil {
+	// Fallback to remind_at or time for backward compatibility
+	if dtstart == nil {
+		if dt, ok := params["remind_at"]; ok && dt != "" {
+			dtstart = parseDateTime(dt)
+		}
+	}
+	if dtstart == nil {
 		if dt, ok := params["time"]; ok && dt != "" {
-			remindAt = parseDateTime(dt)
+			dtstart = parseDateTime(dt)
 		}
 	}
 
-	reminder, err := h.CreateReminder(ctx, msg.From.ID, message, remindAt, "")
+	// Get RRULE
+	rruleStr := params["rrule"]
+
+	reminder, err := h.CreateReminder(ctx, msg.From.ID, message, dtstart, rruleStr)
 	if err != nil {
 		result := "建立提醒失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("⏰ 提醒已設定 (ID: %d)\n訊息: %s", reminder.ReminderID, message)
-	if remindAt != nil {
-		result += fmt.Sprintf("\n時間: %s", remindAt.Format("2006-01-02 15:04"))
+	result := fmt.Sprintf("提醒已設定 (ID: %d)\n訊息: %s", reminder.ReminderID, message)
+	if dtstart != nil {
+		result += fmt.Sprintf("\n首次提醒: %s", dtstart.Format("2006-01-02 15:04"))
 	}
-	h.sendMessage(msg.Chat.ID, result)
+	if rruleStr != "" {
+		result += fmt.Sprintf("\n重複: %s", rrule.HumanReadableChinese(rruleStr))
+	}
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAICreateTransaction(ctx context.Context, msg *tgbotapi.Message, params map[string]string, txType models.TransactionType) string {
+	return h.handleAICreateTransactionResult(ctx, msg, params, txType, true)
+}
+
+func (h *Handlers) handleAICreateTransactionResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, txType models.TransactionType, sendMsg bool) string {
 	amountStr := params["amount"]
 	if amountStr == "" {
 		result := "請提供金額"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	amount, err := strconv.ParseFloat(amountStr, 64)
 	if err != nil {
 		result := "無效的金額"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
@@ -733,114 +949,175 @@ func (h *Handlers) handleAICreateTransaction(ctx context.Context, msg *tgbotapi.
 	tx, err := h.CreateTransaction(ctx, msg.From.ID, txType, amount, description, category, nil)
 	if err != nil {
 		result := "記錄失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	emoji := "💸"
 	typeStr := "支出"
 	if txType == models.TransactionTypeIncome {
-		emoji = "💰"
 		typeStr = "收入"
 	}
 
-	result := fmt.Sprintf("%s %s已記錄 (ID: %d)\n金額: %.2f", emoji, typeStr, tx.TransactionID, amount)
+	result := fmt.Sprintf("%s已記錄 (ID: %d)\n金額: %.2f", typeStr, tx.TransactionID, amount)
 	if description != "" {
 		result += fmt.Sprintf("\n說明: %s", description)
 	}
 	if category != "" {
 		result += fmt.Sprintf("\n分類: %s", category)
 	}
-	h.sendMessage(msg.Chat.ID, result)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAICreateEvent(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAICreateEventResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAICreateEventResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	title := params["title"]
 	if title == "" {
 		result := "請提供事件標題"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	description := params["description"]
 	tags := params["tags"]
 
-	var startTime, endTime *time.Time
-	if dt, ok := params["start_time"]; ok && dt != "" {
-		startTime = parseDateTime(dt)
+	// Parse dtstart (first occurrence time)
+	var dtstart *time.Time
+	if dt, ok := params["dtstart"]; ok && dt != "" {
+		dtstart = parseDateTime(dt)
 	}
-	if dt, ok := params["end_time"]; ok && dt != "" {
-		endTime = parseDateTime(dt)
+	// Fallback to start_time for backward compatibility
+	if dtstart == nil {
+		if dt, ok := params["start_time"]; ok && dt != "" {
+			dtstart = parseDateTime(dt)
+		}
 	}
 
-	event, err := h.CreateEvent(ctx, msg.From.ID, title, description, startTime, endTime, 30, tags)
+	// Parse duration (minutes)
+	duration := 60 // Default
+	if d, ok := params["duration"]; ok && d != "" {
+		if parsed, err := strconv.Atoi(d); err == nil {
+			duration = parsed
+		}
+	}
+
+	// Get RRULE
+	rruleStr := params["rrule"]
+
+	event, err := h.CreateEvent(ctx, msg.From.ID, title, description, dtstart, duration, 30, rruleStr, tags)
 	if err != nil {
 		result := "建立事件失敗，請稍後再試"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("📅 事件已建立 (ID: %d)\n標題: %s", event.EventID, title)
-	if startTime != nil {
-		result += fmt.Sprintf("\n開始時間: %s", startTime.Format("2006-01-02 15:04"))
+	result := fmt.Sprintf("事件已建立 (ID: %d)\n標題: %s", event.EventID, title)
+	if dtstart != nil {
+		result += fmt.Sprintf("\n首次時間: %s", dtstart.Format("2006-01-02 15:04"))
 	}
-	h.sendMessage(msg.Chat.ID, result)
+	if duration > 0 {
+		result += fmt.Sprintf("\n時長: %d 分鐘", duration)
+	}
+	if rruleStr != "" {
+		result += fmt.Sprintf("\n重複: %s", rrule.HumanReadableChinese(rruleStr))
+	}
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 // Delete handlers
 
 func (h *Handlers) handleAIDeleteMemo(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIDeleteMemoResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIDeleteMemoResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	id, err := strconv.Atoi(params["id"])
 	if err != nil {
 		result := "請提供有效的備忘錄編號"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if err := h.repos.Memo.Delete(ctx, id, msg.From.ID); err != nil {
 		result := "刪除備忘錄失敗，請確認編號是否正確"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("🗑️ 備忘錄 #%d 已刪除", id)
-	h.sendMessage(msg.Chat.ID, result)
+	result := fmt.Sprintf("備忘錄 #%d 已刪除", id)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIDeleteTodo(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIDeleteTodoResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIDeleteTodoResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	id, err := strconv.Atoi(params["id"])
 	if err != nil {
 		result := "請提供有效的待辦事項編號"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if err := h.repos.Todo.Delete(ctx, id, msg.From.ID); err != nil {
 		result := "刪除待辦事項失敗，請確認編號是否正確"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("🗑️ 待辦事項 #%d 已刪除", id)
-	h.sendMessage(msg.Chat.ID, result)
+	result := fmt.Sprintf("待辦事項 #%d 已刪除", id)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIUpdateTodo(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIUpdateTodoResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIUpdateTodoResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	id, err := strconv.Atoi(params["id"])
 	if err != nil {
 		result := "請提供有效的待辦事項編號"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	todo, err := h.repos.Todo.GetByID(ctx, id, msg.From.ID)
 	if err != nil {
 		result := "找不到該待辦事項"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
@@ -863,84 +1140,126 @@ func (h *Handlers) handleAIUpdateTodo(ctx context.Context, msg *tgbotapi.Message
 
 	if err := h.repos.Todo.Update(ctx, todo); err != nil {
 		result := "更新待辦事項失敗"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("✏️ 待辦事項 #%d 已更新", id)
-	h.sendMessage(msg.Chat.ID, result)
+	result := fmt.Sprintf("待辦事項 #%d 已更新", id)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIDeleteReminder(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIDeleteReminderResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIDeleteReminderResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	id, err := strconv.Atoi(params["id"])
 	if err != nil {
 		result := "請提供有效的提醒編號"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if err := h.repos.Reminder.Delete(ctx, id, msg.From.ID); err != nil {
 		result := "刪除提醒失敗，請確認編號是否正確"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("🗑️ 提醒 #%d 已刪除", id)
-	h.sendMessage(msg.Chat.ID, result)
+	result := fmt.Sprintf("提醒 #%d 已刪除", id)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIDeleteTransaction(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIDeleteTransactionResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIDeleteTransactionResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	id, err := strconv.Atoi(params["id"])
 	if err != nil {
 		result := "請提供有效的交易記錄編號"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if err := h.repos.Transaction.Delete(ctx, id, msg.From.ID); err != nil {
 		result := "刪除交易記錄失敗，請確認編號是否正確"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("🗑️ 交易記錄 #%d 已刪除", id)
-	h.sendMessage(msg.Chat.ID, result)
+	result := fmt.Sprintf("交易記錄 #%d 已刪除", id)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIDeleteEvent(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIDeleteEventResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIDeleteEventResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	id, err := strconv.Atoi(params["id"])
 	if err != nil {
 		result := "請提供有效的事件編號"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	if err := h.repos.Event.Delete(ctx, id, msg.From.ID); err != nil {
 		result := "刪除事件失敗，請確認編號是否正確"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("🗑️ 事件 #%d 已刪除", id)
-	h.sendMessage(msg.Chat.ID, result)
+	result := fmt.Sprintf("事件 #%d 已刪除", id)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
 func (h *Handlers) handleAIUpdateEvent(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	return h.handleAIUpdateEventResult(ctx, msg, params, true)
+}
+
+func (h *Handlers) handleAIUpdateEventResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	id, err := strconv.Atoi(params["id"])
 	if err != nil {
 		result := "請提供有效的事件編號"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
 	event, err := h.repos.Event.GetByID(ctx, id, msg.From.ID)
 	if err != nil {
 		result := "找不到該事件"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
@@ -951,24 +1270,56 @@ func (h *Handlers) handleAIUpdateEvent(ctx context.Context, msg *tgbotapi.Messag
 	if desc, ok := params["description"]; ok {
 		event.Description = desc
 	}
-	if dt, ok := params["start_time"]; ok && dt != "" {
-		event.StartTime = parseDateTime(dt)
+	if dt, ok := params["dtstart"]; ok && dt != "" {
+		event.Dtstart = parseDateTime(dt)
 	}
-	if dt, ok := params["end_time"]; ok && dt != "" {
-		event.EndTime = parseDateTime(dt)
+	// Fallback to start_time for backward compatibility
+	if dt, ok := params["start_time"]; ok && dt != "" && event.Dtstart == nil {
+		event.Dtstart = parseDateTime(dt)
+	}
+	if d, ok := params["duration"]; ok && d != "" {
+		if parsed, err := strconv.Atoi(d); err == nil {
+			event.Duration = parsed
+		}
+	}
+	if rruleStr, ok := params["rrule"]; ok {
+		event.RecurrenceRule = rruleStr
 	}
 	if tags, ok := params["tags"]; ok {
 		event.Tags = tags
 	}
 
+	// Recalculate NextOccurrence if dtstart or rrule changed
+	if event.Dtstart != nil {
+		now := time.Now()
+		if event.RecurrenceRule != "" {
+			if event.Dtstart.After(now) {
+				event.NextOccurrence = event.Dtstart
+			} else {
+				next, err := rrule.NextOccurrence(event.RecurrenceRule, *event.Dtstart, now)
+				if err != nil {
+					event.NextOccurrence = event.Dtstart
+				} else {
+					event.NextOccurrence = next
+				}
+			}
+		} else {
+			event.NextOccurrence = event.Dtstart
+		}
+	}
+
 	if err := h.repos.Event.Update(ctx, event); err != nil {
 		result := "更新事件失敗"
-		h.sendMessage(msg.Chat.ID, result)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 		return result
 	}
 
-	result := fmt.Sprintf("✏️ 事件 #%d 已更新", id)
-	h.sendMessage(msg.Chat.ID, result)
+	result := fmt.Sprintf("事件 #%d 已更新", id)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
 	return result
 }
 
@@ -1000,4 +1351,11 @@ func parseDateTime(s string) *time.Time {
 	}
 
 	return nil
+}
+
+func truncateString(s string, maxLen int) string {
+	if len(s) <= maxLen {
+		return s
+	}
+	return s[:maxLen] + "..."
 }

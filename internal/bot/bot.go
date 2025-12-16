@@ -18,7 +18,7 @@ type Bot struct {
 	ai       *ai.Client
 }
 
-func New(token string, db *database.DB, aiClient *ai.Client) (*Bot, error) {
+func New(token string, db *database.DB, aiClient *ai.Client, devMode bool) (*Bot, error) {
 	api, err := tgbotapi.NewBotAPI(token)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create bot: %w", err)
@@ -36,7 +36,7 @@ func New(token string, db *database.DB, aiClient *ai.Client) (*Bot, error) {
 
 	return &Bot{
 		api:      api,
-		handlers: handlers.New(api, repos, aiClient),
+		handlers: handlers.New(api, repos, aiClient, devMode),
 		ai:       aiClient,
 	}, nil
 }
@@ -60,6 +60,12 @@ func (b *Bot) Start(ctx context.Context) error {
 }
 
 func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
+	// Handle callback queries (inline keyboard button clicks)
+	if update.CallbackQuery != nil {
+		b.handlers.HandleCallbackQuery(ctx, update.CallbackQuery)
+		return
+	}
+
 	if update.Message == nil {
 		return
 	}

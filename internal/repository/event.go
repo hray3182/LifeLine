@@ -18,22 +18,21 @@ func NewEventRepository(db *database.DB) *EventRepository {
 
 func (r *EventRepository) Create(ctx context.Context, event *models.Event) error {
 	return r.db.Pool.QueryRow(ctx,
-		`INSERT INTO event (user_id, title, description, start_time, end_time, notification_minutes,
-		 recurrence_rule, frequency, interval, by_day, until, tags)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
+		`INSERT INTO event (user_id, title, description, dtstart, duration, next_occurrence,
+		 notification_minutes, recurrence_rule, tags)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
 		 RETURNING event_id, created_at`,
-		event.UserID, event.Title, event.Description, event.StartTime, event.EndTime,
-		event.NotificationMinutes, event.RecurrenceRule, event.Frequency, event.Interval,
-		event.ByDay, event.Until, event.Tags,
+		event.UserID, event.Title, event.Description, event.Dtstart, event.Duration,
+		event.NextOccurrence, event.NotificationMinutes, event.RecurrenceRule, event.Tags,
 	).Scan(&event.EventID, &event.CreatedAt)
 }
 
 func (r *EventRepository) GetByUserID(ctx context.Context, userID int64) ([]*models.Event, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT event_id, user_id, title, description, start_time, end_time, notification_minutes,
-		 recurrence_rule, frequency, interval, by_day, until, tags, created_at
+		`SELECT event_id, user_id, title, description, dtstart, duration, next_occurrence,
+		 notification_minutes, recurrence_rule, tags, created_at
 		 FROM event WHERE user_id = $1
-		 ORDER BY start_time ASC NULLS LAST`,
+		 ORDER BY next_occurrence ASC NULLS LAST, dtstart ASC NULLS LAST`,
 		userID,
 	)
 	if err != nil {
@@ -47,13 +46,13 @@ func (r *EventRepository) GetByUserID(ctx context.Context, userID int64) ([]*mod
 func (r *EventRepository) GetByID(ctx context.Context, eventID int, userID int64) (*models.Event, error) {
 	event := &models.Event{}
 	err := r.db.Pool.QueryRow(ctx,
-		`SELECT event_id, user_id, title, description, start_time, end_time, notification_minutes,
-		 recurrence_rule, frequency, interval, by_day, until, tags, created_at
+		`SELECT event_id, user_id, title, description, dtstart, duration, next_occurrence,
+		 notification_minutes, recurrence_rule, tags, created_at
 		 FROM event WHERE event_id = $1 AND user_id = $2`,
 		eventID, userID,
-	).Scan(&event.EventID, &event.UserID, &event.Title, &event.Description, &event.StartTime,
-		&event.EndTime, &event.NotificationMinutes, &event.RecurrenceRule, &event.Frequency,
-		&event.Interval, &event.ByDay, &event.Until, &event.Tags, &event.CreatedAt)
+	).Scan(&event.EventID, &event.UserID, &event.Title, &event.Description, &event.Dtstart,
+		&event.Duration, &event.NextOccurrence, &event.NotificationMinutes, &event.RecurrenceRule,
+		&event.Tags, &event.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -62,10 +61,10 @@ func (r *EventRepository) GetByID(ctx context.Context, eventID int, userID int64
 
 func (r *EventRepository) GetByDateRange(ctx context.Context, userID int64, start, end time.Time) ([]*models.Event, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT event_id, user_id, title, description, start_time, end_time, notification_minutes,
-		 recurrence_rule, frequency, interval, by_day, until, tags, created_at
-		 FROM event WHERE user_id = $1 AND start_time >= $2 AND start_time <= $3
-		 ORDER BY start_time ASC`,
+		`SELECT event_id, user_id, title, description, dtstart, duration, next_occurrence,
+		 notification_minutes, recurrence_rule, tags, created_at
+		 FROM event WHERE user_id = $1 AND next_occurrence >= $2 AND next_occurrence <= $3
+		 ORDER BY next_occurrence ASC`,
 		userID, start, end,
 	)
 	if err != nil {
@@ -80,10 +79,10 @@ func (r *EventRepository) GetUpcoming(ctx context.Context, userID int64, within 
 	now := time.Now()
 	deadline := now.Add(within)
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT event_id, user_id, title, description, start_time, end_time, notification_minutes,
-		 recurrence_rule, frequency, interval, by_day, until, tags, created_at
-		 FROM event WHERE user_id = $1 AND start_time >= $2 AND start_time <= $3
-		 ORDER BY start_time ASC`,
+		`SELECT event_id, user_id, title, description, dtstart, duration, next_occurrence,
+		 notification_minutes, recurrence_rule, tags, created_at
+		 FROM event WHERE user_id = $1 AND next_occurrence >= $2 AND next_occurrence <= $3
+		 ORDER BY next_occurrence ASC`,
 		userID, now, deadline,
 	)
 	if err != nil {
@@ -96,15 +95,39 @@ func (r *EventRepository) GetUpcoming(ctx context.Context, userID int64, within 
 
 func (r *EventRepository) Update(ctx context.Context, event *models.Event) error {
 	_, err := r.db.Pool.Exec(ctx,
-		`UPDATE event SET title = $1, description = $2, start_time = $3, end_time = $4,
-		 notification_minutes = $5, recurrence_rule = $6, frequency = $7, interval = $8,
-		 by_day = $9, until = $10, tags = $11
-		 WHERE event_id = $12 AND user_id = $13`,
-		event.Title, event.Description, event.StartTime, event.EndTime, event.NotificationMinutes,
-		event.RecurrenceRule, event.Frequency, event.Interval, event.ByDay, event.Until, event.Tags,
+		`UPDATE event SET title = $1, description = $2, dtstart = $3, duration = $4,
+		 next_occurrence = $5, notification_minutes = $6, recurrence_rule = $7, tags = $8
+		 WHERE event_id = $9 AND user_id = $10`,
+		event.Title, event.Description, event.Dtstart, event.Duration, event.NextOccurrence,
+		event.NotificationMinutes, event.RecurrenceRule, event.Tags,
 		event.EventID, event.UserID,
 	)
 	return err
+}
+
+func (r *EventRepository) UpdateNextOccurrence(ctx context.Context, eventID int, nextOccurrence *time.Time) error {
+	_, err := r.db.Pool.Exec(ctx,
+		`UPDATE event SET next_occurrence = $1 WHERE event_id = $2`,
+		nextOccurrence, eventID,
+	)
+	return err
+}
+
+func (r *EventRepository) GetPassedEvents(ctx context.Context, before time.Time) ([]*models.Event, error) {
+	rows, err := r.db.Pool.Query(ctx,
+		`SELECT event_id, user_id, title, description, dtstart, duration, next_occurrence,
+		 notification_minutes, recurrence_rule, tags, created_at
+		 FROM event
+		 WHERE next_occurrence IS NOT NULL AND next_occurrence <= $1
+		 ORDER BY next_occurrence ASC`,
+		before,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return r.scanEvents(rows)
 }
 
 func (r *EventRepository) Delete(ctx context.Context, eventID int, userID int64) error {
@@ -117,13 +140,13 @@ func (r *EventRepository) Delete(ctx context.Context, eventID int, userID int64)
 
 func (r *EventRepository) GetPendingNotifications(ctx context.Context) ([]*models.Event, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT event_id, user_id, title, description, start_time, end_time, notification_minutes,
-		 recurrence_rule, frequency, interval, by_day, until, tags, created_at
+		`SELECT event_id, user_id, title, description, dtstart, duration, next_occurrence,
+		 notification_minutes, recurrence_rule, tags, created_at
 		 FROM event
-		 WHERE start_time IS NOT NULL
-		 AND start_time - (notification_minutes || ' minutes')::interval <= NOW()
-		 AND start_time > NOW()
-		 ORDER BY start_time ASC`,
+		 WHERE next_occurrence IS NOT NULL
+		 AND next_occurrence - (notification_minutes || ' minutes')::interval <= NOW()
+		 AND next_occurrence > NOW()
+		 ORDER BY next_occurrence ASC`,
 	)
 	if err != nil {
 		return nil, err
@@ -135,10 +158,10 @@ func (r *EventRepository) GetPendingNotifications(ctx context.Context) ([]*model
 
 func (r *EventRepository) Search(ctx context.Context, userID int64, keyword string) ([]*models.Event, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT event_id, user_id, title, description, start_time, end_time, notification_minutes,
-		 recurrence_rule, frequency, interval, by_day, until, tags, created_at
+		`SELECT event_id, user_id, title, description, dtstart, duration, next_occurrence,
+		 notification_minutes, recurrence_rule, tags, created_at
 		 FROM event WHERE user_id = $1 AND (title ILIKE $2 OR description ILIKE $2 OR tags ILIKE $2)
-		 ORDER BY start_time ASC NULLS LAST`,
+		 ORDER BY next_occurrence ASC NULLS LAST, dtstart ASC NULLS LAST`,
 		userID, "%"+keyword+"%",
 	)
 	if err != nil {
@@ -157,8 +180,8 @@ func (r *EventRepository) scanEvents(rows interface {
 	for rows.Next() {
 		event := &models.Event{}
 		if err := rows.Scan(&event.EventID, &event.UserID, &event.Title, &event.Description,
-			&event.StartTime, &event.EndTime, &event.NotificationMinutes, &event.RecurrenceRule,
-			&event.Frequency, &event.Interval, &event.ByDay, &event.Until, &event.Tags, &event.CreatedAt); err != nil {
+			&event.Dtstart, &event.Duration, &event.NextOccurrence, &event.NotificationMinutes,
+			&event.RecurrenceRule, &event.Tags, &event.CreatedAt); err != nil {
 			return nil, err
 		}
 		events = append(events, event)
