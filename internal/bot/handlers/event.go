@@ -48,6 +48,7 @@ func (h *Handlers) handleEvent(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	h.notifyScheduler()
 	timeStr := "未設定"
 	if dtstart != nil {
 		timeStr = dtstart.Format("2006-01-02 15:04")
@@ -143,5 +144,8 @@ func (h *Handlers) CreateEvent(ctx context.Context, userID int64, title, descrip
 	}
 
 	err := h.repos.Event.Create(ctx, event)
+	if err == nil {
+		h.notifyScheduler()
+	}
 	return event, err
 }

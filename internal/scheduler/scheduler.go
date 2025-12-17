@@ -19,6 +19,7 @@ type Scheduler struct {
 	checkInterval     time.Duration
 	notifiedReminders map[int]bool
 	notifiedEvents    map[int]bool
+	notifyCh          chan struct{}
 }
 
 func New(
@@ -35,6 +36,16 @@ func New(
 		checkInterval:     1 * time.Minute,
 		notifiedReminders: make(map[int]bool),
 		notifiedEvents:    make(map[int]bool),
+		notifyCh:          make(chan struct{}, 1),
+	}
+}
+
+// Notify triggers an immediate check. Non-blocking if a check is already pending.
+func (s *Scheduler) Notify() {
+	select {
+	case s.notifyCh <- struct{}{}:
+	default:
+		// Channel already has a pending notification, skip
 	}
 }
 
@@ -59,6 +70,9 @@ func (s *Scheduler) Start(ctx context.Context) {
 			log.Println("Scheduler stopped")
 			return
 		case <-ticker.C:
+			s.check(ctx)
+		case <-s.notifyCh:
+			log.Println("Scheduler triggered by notification")
 			s.check(ctx)
 		}
 	}

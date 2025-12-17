@@ -79,3 +79,8 @@ func (b *Bot) handleUpdate(ctx context.Context, update tgbotapi.Update) {
 	// Handle regular messages with AI
 	b.handlers.HandleMessage(ctx, update.Message)
 }
+
+// SetSchedulerNotify sets the scheduler notification function for the handlers
+func (b *Bot) SetSchedulerNotify(fn func()) {
+	b.handlers.SetSchedulerNotify(fn)
+}

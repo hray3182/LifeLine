@@ -47,6 +47,7 @@ func (h *Handlers) handleReminder(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	h.notifyScheduler()
 	h.sendMessage(msg.Chat.ID, fmt.Sprintf("⏰ 提醒已設定\n時間: %s\n訊息: %s",
 		remindTime.Format("2006-01-02 15:04"), message))
 }
@@ -138,5 +139,8 @@ func (h *Handlers) CreateReminder(ctx context.Context, userID int64, message str
 	}
 
 	err := h.repos.Reminder.Create(ctx, reminder)
+	if err == nil {
+		h.notifyScheduler()
+	}
 	return reminder, err
 }

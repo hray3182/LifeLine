@@ -4,6 +4,8 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"log/slog"
+	"os"
 	"strconv"
 	"strings"
 	"time"
@@ -24,19 +26,47 @@ type Repositories struct {
 }
 
 type Handlers struct {
-	api     *tgbotapi.BotAPI
-	repos   *Repositories
-	ai      *ai.Client
-	devMode bool
+	api             *tgbotapi.BotAPI
+	repos           *Repositories
+	ai              *ai.Client
+	devMode         bool
+	logger          *slog.Logger
+	schedulerNotify func()
 }
 
 func New(api *tgbotapi.BotAPI, repos *Repositories, aiClient *ai.Client, devMode bool) *Handlers {
+	// Setup logger based on devMode
+	var logger *slog.Logger
+	if devMode {
+		logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelDebug}))
+	} else {
+		logger = slog.New(slog.NewTextHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelInfo}))
+	}
+
 	return &Handlers{
 		api:     api,
 		repos:   repos,
 		ai:      aiClient,
 		devMode: devMode,
+		logger:  logger,
 	}
+}
+
+// SetSchedulerNotify sets the scheduler notification function
+func (h *Handlers) SetSchedulerNotify(fn func()) {
+	h.schedulerNotify = fn
+}
+
+// notifyScheduler triggers the scheduler to check for pending items
+func (h *Handlers) notifyScheduler() {
+	if h.schedulerNotify != nil {
+		h.schedulerNotify()
+	}
+}
+
+// debug logs at debug level (only shown in dev mode)
+func (h *Handlers) debug(msg string, args ...any) {
+	h.logger.Debug(msg, args...)
 }
 
 func (h *Handlers) HandleCommand(ctx context.Context, msg *tgbotapi.Message) {
@@ -94,6 +124,8 @@ func (h *Handlers) HandleMessage(ctx context.Context, msg *tgbotapi.Message) {
 }
 
 func (h *Handlers) HandleCallbackQuery(ctx context.Context, callback *tgbotapi.CallbackQuery) {
+	h.debug("HandleCallbackQuery received", "data", callback.Data, "user_id", callback.From.ID)
+
 	// Answer callback to remove loading state
 	answer := tgbotapi.NewCallback(callback.ID, "")
 	if _, err := h.api.Request(answer); err != nil {
@@ -103,17 +135,22 @@ func (h *Handlers) HandleCallbackQuery(ctx context.Context, callback *tgbotapi.C
 	// Parse callback data: "confirm:userID", "cancel:userID", or "option:userID:index"
 	parts := strings.Split(callback.Data, ":")
 	if len(parts) < 2 {
+		h.debug("HandleCallbackQuery: invalid callback data format", "parts", len(parts))
 		return
 	}
 
 	action := parts[0]
 	userID, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
+		h.debug("HandleCallbackQuery: failed to parse userID", "error", err)
 		return
 	}
 
+	h.debug("HandleCallbackQuery parsed", "action", action, "target_user_id", userID)
+
 	// Verify the callback is from the correct user
 	if callback.From.ID != userID {
+		h.debug("HandleCallbackQuery: user mismatch", "from_id", callback.From.ID, "target_id", userID)
 		h.answerCallbackWithAlert(callback.ID, "這不是你的操作")
 		return
 	}
@@ -123,7 +160,10 @@ func (h *Handlers) HandleCallbackQuery(ctx context.Context, callback *tgbotapi.C
 	pending, exists := pendingConfirmations[userID]
 	pendingMutex.RUnlock()
 
+	h.debug("HandleCallbackQuery: pending check", "exists", exists)
+
 	if !exists || time.Now().After(pending.ExpiresAt) {
+		h.debug("HandleCallbackQuery: confirmation expired or not found", "exists", exists)
 		if exists {
 			pendingMutex.Lock()
 			delete(pendingConfirmations, userID)
@@ -132,6 +172,8 @@ func (h *Handlers) HandleCallbackQuery(ctx context.Context, callback *tgbotapi.C
 		h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, "⏰ 確認已過期")
 		return
 	}
+
+	h.debug("HandleCallbackQuery: found valid pending confirmation", "intent_action", pending.Intent.Action)
 
 	// Clear pending
 	pendingMutex.Lock()
@@ -146,30 +188,106 @@ func (h *Handlers) HandleCallbackQuery(ctx context.Context, callback *tgbotapi.C
 
 	switch action {
 	case "confirm":
-		result := h.executeIntentWithResult(ctx, fakeMsg, pending.Intent)
-		h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, "✅ 已確認\n\n"+result)
+		h.debug("HandleCallbackQuery: executing confirm action")
+		h.executeAfterConfirmation(ctx, fakeMsg, callback.Message.Chat.ID, callback.Message.MessageID, pending.Intent, "已確認")
 	case "cancel":
+		h.debug("HandleCallbackQuery: executing cancel action")
 		h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, "❌ 已取消操作")
 	case "option":
+		h.debug("HandleCallbackQuery: processing option selection")
 		// Parse option index
 		if len(parts) != 3 {
+			h.debug("HandleCallbackQuery: invalid option format", "parts", len(parts))
 			return
 		}
 		optionIndex, err := strconv.Atoi(parts[2])
 		if err != nil || optionIndex < 0 || optionIndex >= len(pending.Intent.ConfirmationOptions) {
+			h.debug("HandleCallbackQuery: invalid option index", "index", parts[2], "error", err)
 			h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, "❌ 無效的選項")
 			return
 		}
 
 		// Get selected option and merge parameters
 		selectedOption := pending.Intent.ConfirmationOptions[optionIndex]
+		h.debug("HandleCallbackQuery: selected option", "label", selectedOption.Label, "params", selectedOption.Parameters)
+		if pending.Intent.Parameters == nil {
+			pending.Intent.Parameters = make(map[string]string)
+		}
 		for key, value := range selectedOption.Parameters {
 			pending.Intent.Parameters[key] = value
 		}
 
-		result := h.executeIntentWithResult(ctx, fakeMsg, pending.Intent)
-		h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, fmt.Sprintf("✅ 已選擇「%s」\n\n%s", selectedOption.Label, result))
+		h.debug("HandleCallbackQuery: executing option action", "merged_params", pending.Intent.Parameters)
+		h.executeAfterConfirmation(ctx, fakeMsg, callback.Message.Chat.ID, callback.Message.MessageID, pending.Intent, fmt.Sprintf("已選擇「%s」", selectedOption.Label))
 	}
+}
+
+// executeAfterConfirmation handles execution after user confirmation, supporting ReturnResultToAI flow
+func (h *Handlers) executeAfterConfirmation(ctx context.Context, fakeMsg *tgbotapi.Message, chatID int64, messageID int, intent *ai.Intent, confirmText string) {
+	h.debug("executeAfterConfirmation", "action", intent.Action, "return_result_to_ai", intent.ReturnResultToAI)
+
+	var result string
+	// Handle multi_action specially
+	if intent.Action == "multi_action" && len(intent.Actions) > 0 {
+		h.debug("executeAfterConfirmation: handling multi_action", "action_count", len(intent.Actions))
+		var results []string
+		for i, action := range intent.Actions {
+			h.debug("executeAfterConfirmation: executing sub-action", "index", i, "action", action.Action)
+			actionResult := h.executeSingleAction(ctx, fakeMsg, action.Action, action.Parameters, false)
+			results = append(results, fmt.Sprintf("[%d] %s", i+1, actionResult))
+		}
+		result = strings.Join(results, "\n")
+	} else {
+		result = h.executeSingleAction(ctx, fakeMsg, intent.Action, intent.Parameters, false)
+	}
+	h.debug("Tool result (confirmation)", "result", result)
+
+	// If ReturnResultToAI is set, let AI process the result
+	if intent.ReturnResultToAI && h.ai != nil {
+		h.debug("ReturnResultToAI flow after confirmation")
+
+		// Build conversation history with the tool result
+		history := []ai.Message{
+			{Role: "assistant", Content: "[工具執行結果]\n" + result},
+		}
+
+		// Let AI decide next action
+		nextIntent, err := h.ai.ParseIntentWithHistory(ctx, history)
+		if err != nil {
+			log.Printf("Failed to parse next intent after confirmation: %v", err)
+			h.editMessageText(chatID, messageID, fmt.Sprintf("✅ %s\n\n%s", confirmText, result))
+			return
+		}
+
+		h.debug("Next intent after confirmation",
+			"action", nextIntent.Action,
+			"needs_confirmation", nextIntent.NeedsConfirmation,
+			"ai_message", nextIntent.AIMessage,
+			"raw", nextIntent.RawResponse)
+
+		// If AI needs another confirmation (e.g., for delete)
+		if nextIntent.NeedsConfirmation {
+			h.editMessageText(chatID, messageID, fmt.Sprintf("✅ %s", confirmText))
+			h.requestConfirmation(chatID, fakeMsg.From.ID, nextIntent)
+			return
+		}
+
+		// If AI just wants to send a message
+		if nextIntent.AIMessage != "" {
+			h.editMessageText(chatID, messageID, fmt.Sprintf("✅ %s\n\n%s", confirmText, nextIntent.AIMessage))
+			return
+		}
+
+		// Execute the next action if needed
+		if nextIntent.Action != "unknown" && nextIntent.Action != "" {
+			nextResult := h.executeSingleAction(ctx, fakeMsg, nextIntent.Action, nextIntent.Parameters, false)
+			h.editMessageText(chatID, messageID, fmt.Sprintf("✅ %s\n\n%s", confirmText, nextResult))
+			return
+		}
+	}
+
+	// Default: just show the result
+	h.editMessageText(chatID, messageID, fmt.Sprintf("✅ %s\n\n%s", confirmText, result))
 }
 
 func (h *Handlers) answerCallbackWithAlert(callbackID string, text string) {
