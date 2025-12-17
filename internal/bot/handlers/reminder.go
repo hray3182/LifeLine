@@ -60,25 +60,33 @@ func (h *Handlers) handleReminderList(ctx context.Context, msg *tgbotapi.Message
 		return
 	}
 
-	if len(reminders) == 0 {
-		h.sendMessage(msg.Chat.ID, "⏰ 目前沒有提醒")
+	// 過濾掉已停用和已過期的提醒，只顯示即將到來的
+	now := time.Now()
+	var upcomingReminders []*models.Reminder
+	for _, r := range reminders {
+		if !r.Enabled {
+			continue
+		}
+		// 保留：沒有設定時間的、時間還沒到的、或有重複規則的（會有下次提醒）
+		if r.RemindAt == nil || r.RemindAt.After(now) || r.RecurrenceRule != "" {
+			upcomingReminders = append(upcomingReminders, r)
+		}
+	}
+
+	if len(upcomingReminders) == 0 {
+		h.sendMessage(msg.Chat.ID, "⏰ 目前沒有即將到來的提醒")
 		return
 	}
 
 	var sb strings.Builder
-	sb.WriteString("⏰ **提醒列表**\n\n")
-	for _, r := range reminders {
-		status := "✅"
-		if !r.Enabled {
-			status = "❌"
-		}
-
+	sb.WriteString("⏰ **即將到來的提醒**\n\n")
+	for _, r := range upcomingReminders {
 		timeStr := "未設定"
 		if r.RemindAt != nil {
 			timeStr = r.RemindAt.Format("2006-01-02 15:04")
 		}
 
-		sb.WriteString(fmt.Sprintf("%s **%d.** %s\n", status, r.ReminderID, r.Messages))
+		sb.WriteString(fmt.Sprintf("**%d.** %s\n", r.ReminderID, r.Messages))
 		sb.WriteString(fmt.Sprintf("   📅 %s\n\n", timeStr))
 	}
 

@@ -427,6 +427,11 @@ func (h *Handlers) executeSingleAction(ctx context.Context, msg *tgbotapi.Messag
 		result = h.handleAIUpdateEventResult(ctx, msg, params, sendMsg)
 	case "query_schedule":
 		result = h.handleQueryScheduleResult(ctx, msg, params, sendMsg)
+	case "find_free_time":
+		result = h.handleFindFreeTime(ctx, msg, params)
+		if sendMsg {
+			h.sendMessage(msg.Chat.ID, result)
+		}
 	case "unknown":
 		result = "無法識別的操作"
 		if sendMsg {

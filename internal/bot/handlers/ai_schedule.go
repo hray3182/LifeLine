@@ -106,11 +106,23 @@ func (h *Handlers) handleQueryScheduleResult(ctx context.Context, msg *tgbotapi.
 	todos, err := h.repos.Todo.GetByUserID(ctx, msg.From.ID, false)
 	if err == nil {
 		var relevantTodos []*models.Todo
+		var upcomingTodos []*models.Todo // 即將到期但不在查詢範圍內的 todo
+
 		for _, t := range todos {
-			if t.DueTime != nil && !t.DueTime.Before(startTime) && t.DueTime.Before(endTime) {
-				relevantTodos = append(relevantTodos, t)
+			if t.DueTime != nil {
+				if !t.DueTime.Before(startTime) && t.DueTime.Before(endTime) {
+					// 截止時間在查詢範圍內
+					relevantTodos = append(relevantTodos, t)
+				} else if !t.DueTime.Before(endTime) && t.DueTime.Before(endTime.Add(48*time.Hour)) {
+					// 截止時間在查詢範圍結束後 48 小時內（即將到期）
+					// 只顯示優先級 >= 4 的重要事項，過濾掉日常提醒類的低優先級 todo
+					if t.Priority >= 4 {
+						upcomingTodos = append(upcomingTodos, t)
+					}
+				}
 			}
 		}
+
 		if len(relevantTodos) > 0 {
 			sb.WriteString("【待辦事項】\n")
 			for _, t := range relevantTodos {
@@ -120,6 +132,16 @@ func (h *Handlers) handleQueryScheduleResult(ctx context.Context, msg *tgbotapi.
 					sb.WriteString(fmt.Sprintf(" (截止: %s)", timeStr))
 				}
 				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
+		}
+
+		// 顯示即將到期的待辦事項
+		if len(upcomingTodos) > 0 {
+			sb.WriteString("【即將到期的待辦】\n")
+			for _, t := range upcomingTodos {
+				timeLeftStr := formatTimeLeft(t.DueTime, now)
+				sb.WriteString(fmt.Sprintf("• [#%d] %s (%s)\n", t.TodoID, t.Title, timeLeftStr))
 			}
 			sb.WriteString("\n")
 		}
@@ -177,6 +199,38 @@ func (h *Handlers) handleQueryScheduleResult(ctx context.Context, msg *tgbotapi.
 	return result
 }
 
+// formatTimeLeft formats the remaining time until deadline in a human-readable way
+func formatTimeLeft(dueTime *time.Time, now time.Time) string {
+	if dueTime == nil {
+		return "無截止時間"
+	}
+
+	duration := dueTime.Sub(now)
+	if duration < 0 {
+		return "已過期"
+	}
+
+	hours := int(duration.Hours())
+	minutes := int(duration.Minutes()) % 60
+
+	if hours >= 24 {
+		days := hours / 24
+		remainingHours := hours % 24
+		if remainingHours > 0 {
+			return fmt.Sprintf("剩餘 %d 天 %d 小時", days, remainingHours)
+		}
+		return fmt.Sprintf("剩餘 %d 天", days)
+	} else if hours > 0 {
+		if minutes > 0 {
+			return fmt.Sprintf("剩餘 %d 小時 %d 分鐘", hours, minutes)
+		}
+		return fmt.Sprintf("剩餘 %d 小時", hours)
+	} else if minutes > 0 {
+		return fmt.Sprintf("剩餘 %d 分鐘", minutes)
+	}
+	return "即將到期"
+}
+
 // getDateEmoji returns a calendar emoji for the day of month (1-31)
 func getDateEmoji(t time.Time) string {
 	// Try to use keycap number emojis for the day
@@ -227,4 +281,168 @@ func truncateString(s string, maxLen int) string {
 		return s
 	}
 	return s[:maxLen] + "..."
+}
+
+// handleFindFreeTime finds free time slots on a given date
+func (h *Handlers) handleFindFreeTime(ctx context.Context, msg *tgbotapi.Message, params map[string]string) string {
+	dateStr := params["date"]
+
+	now := time.Now()
+	loc := now.Location()
+	today := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+
+	// Parse target date
+	var targetDate time.Time
+	if dateStr != "" {
+		if parsed := parseDateTime(dateStr); parsed != nil {
+			targetDate = time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, loc)
+		} else {
+			targetDate = today
+		}
+	} else {
+		targetDate = today
+	}
+
+	// Define working hours (08:00 - 22:00)
+	dayStart := time.Date(targetDate.Year(), targetDate.Month(), targetDate.Day(), 8, 0, 0, 0, loc)
+	dayEnd := time.Date(targetDate.Year(), targetDate.Month(), targetDate.Day(), 22, 0, 0, 0, loc)
+
+	// If target date is today and current time is past 8:00, start from now (rounded to next 30 min)
+	if targetDate.Equal(today) && now.After(dayStart) {
+		// Round up to next 30 minutes
+		minutes := now.Minute()
+		if minutes > 30 {
+			dayStart = time.Date(now.Year(), now.Month(), now.Day(), now.Hour()+1, 0, 0, 0, loc)
+		} else if minutes > 0 {
+			dayStart = time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 30, 0, 0, loc)
+		} else {
+			dayStart = time.Date(now.Year(), now.Month(), now.Day(), now.Hour(), 0, 0, 0, loc)
+		}
+	}
+
+	// Collect busy time slots
+	type timeSlot struct {
+		start time.Time
+		end   time.Time
+		title string
+	}
+	var busySlots []timeSlot
+
+	// Get events for the day
+	events, err := h.repos.Event.GetByDateRange(ctx, msg.From.ID, targetDate, targetDate.Add(24*time.Hour))
+	if err == nil {
+		for _, e := range events {
+			var eventStart *time.Time
+			if e.NextOccurrence != nil {
+				eventStart = e.NextOccurrence
+			} else if e.Dtstart != nil {
+				eventStart = e.Dtstart
+			}
+			if eventStart != nil {
+				duration := e.Duration
+				if duration == 0 {
+					duration = 60 // default 60 minutes
+				}
+				busySlots = append(busySlots, timeSlot{
+					start: *eventStart,
+					end:   eventStart.Add(time.Duration(duration) * time.Minute),
+					title: e.Title,
+				})
+			}
+		}
+	}
+
+	// Sort busy slots by start time
+	for i := 0; i < len(busySlots)-1; i++ {
+		for j := i + 1; j < len(busySlots); j++ {
+			if busySlots[j].start.Before(busySlots[i].start) {
+				busySlots[i], busySlots[j] = busySlots[j], busySlots[i]
+			}
+		}
+	}
+
+	// Find free slots
+	var freeSlots []timeSlot
+	currentTime := dayStart
+
+	for _, busy := range busySlots {
+		// Skip if busy slot is outside our time range
+		if busy.end.Before(dayStart) || busy.start.After(dayEnd) {
+			continue
+		}
+
+		// Adjust busy slot to our time range
+		busyStart := busy.start
+		if busyStart.Before(dayStart) {
+			busyStart = dayStart
+		}
+
+		// If there's a gap before this busy slot, it's free time
+		if currentTime.Before(busyStart) {
+			freeSlots = append(freeSlots, timeSlot{
+				start: currentTime,
+				end:   busyStart,
+			})
+		}
+
+		// Move current time to end of busy slot
+		if busy.end.After(currentTime) {
+			currentTime = busy.end
+		}
+	}
+
+	// Add remaining time until end of day
+	if currentTime.Before(dayEnd) {
+		freeSlots = append(freeSlots, timeSlot{
+			start: currentTime,
+			end:   dayEnd,
+		})
+	}
+
+	// Build result
+	var sb strings.Builder
+	dateLabel := targetDate.Format("2006-01-02")
+	if targetDate.Equal(today) {
+		dateLabel = "今天 (" + targetDate.Format("01/02") + ")"
+	} else if targetDate.Equal(today.Add(24*time.Hour)) {
+		dateLabel = "明天 (" + targetDate.Format("01/02") + ")"
+	}
+
+	sb.WriteString(fmt.Sprintf("【%s 的空閒時段】\n\n", dateLabel))
+
+	if len(freeSlots) == 0 {
+		sb.WriteString("這天沒有空閒時間。\n")
+	} else {
+		for _, slot := range freeSlots {
+			duration := slot.end.Sub(slot.start)
+			hours := int(duration.Hours())
+			minutes := int(duration.Minutes()) % 60
+
+			durationStr := ""
+			if hours > 0 && minutes > 0 {
+				durationStr = fmt.Sprintf("%d小時%d分鐘", hours, minutes)
+			} else if hours > 0 {
+				durationStr = fmt.Sprintf("%d小時", hours)
+			} else {
+				durationStr = fmt.Sprintf("%d分鐘", minutes)
+			}
+
+			sb.WriteString(fmt.Sprintf("• %s - %s (%s)\n",
+				slot.start.Format("15:04"),
+				slot.end.Format("15:04"),
+				durationStr))
+		}
+	}
+
+	if len(busySlots) > 0 {
+		sb.WriteString("\n【已安排的事項】\n")
+		for _, busy := range busySlots {
+			sb.WriteString(fmt.Sprintf("• %s - %s: %s\n",
+				busy.start.Format("15:04"),
+				busy.end.Format("15:04"),
+				busy.title))
+		}
+	}
+
+	return sb.String()
 }

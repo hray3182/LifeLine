@@ -71,20 +71,58 @@ func (h *Handlers) handleEventList(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📅 **近期事件**\n\n")
+	sb.WriteString("📅 **近期事件**\n")
+
+	// 按日期分組
+	currentDate := ""
+	now := time.Now()
+	today := now.Format("2006-01-02")
+	tomorrow := now.AddDate(0, 0, 1).Format("2006-01-02")
+
 	for _, event := range events {
-		timeStr := "未設定時間"
+		var eventDate string
+		var eventTime *time.Time
+
 		if event.NextOccurrence != nil {
-			timeStr = event.NextOccurrence.Format("01/02 15:04")
+			eventTime = event.NextOccurrence
 		} else if event.Dtstart != nil {
-			timeStr = event.Dtstart.Format("01/02 15:04")
+			eventTime = event.Dtstart
 		}
 
-		sb.WriteString(fmt.Sprintf("**%d.** %s\n", event.EventID, event.Title))
-		sb.WriteString(fmt.Sprintf("   🕐 %s\n", timeStr))
-		if event.Duration > 0 {
-			sb.WriteString(fmt.Sprintf("   ⏱ %d 分鐘\n", event.Duration))
+		if eventTime != nil {
+			eventDate = eventTime.Format("2006-01-02")
+		} else {
+			eventDate = "未設定"
 		}
+
+		// 如果日期改變，顯示日期標題
+		if eventDate != currentDate {
+			currentDate = eventDate
+			var dateLabel string
+			if eventDate == today {
+				dateLabel = "今天"
+			} else if eventDate == tomorrow {
+				dateLabel = "明天"
+			} else if eventDate == "未設定" {
+				dateLabel = "未設定時間"
+			} else if eventTime != nil {
+				dateLabel = eventTime.Format("01/02 (Mon)")
+			}
+			sb.WriteString(fmt.Sprintf("\n━━━ **%s** ━━━\n", dateLabel))
+		}
+
+		// 顯示事件
+		timeStr := ""
+		if eventTime != nil {
+			timeStr = eventTime.Format("15:04")
+		}
+
+		if timeStr != "" {
+			sb.WriteString(fmt.Sprintf("🕐 %s  %s\n", timeStr, event.Title))
+		} else {
+			sb.WriteString(fmt.Sprintf("• %s\n", event.Title))
+		}
+
 		if event.IsRecurring() {
 			sb.WriteString(fmt.Sprintf("   🔄 %s\n", rrule.HumanReadableChinese(event.RecurrenceRule)))
 		}
@@ -95,7 +133,6 @@ func (h *Handlers) handleEventList(ctx context.Context, msg *tgbotapi.Message) {
 			}
 			sb.WriteString(fmt.Sprintf("   📝 %s\n", desc))
 		}
-		sb.WriteString("\n")
 	}
 
 	h.sendMessage(msg.Chat.ID, sb.String())

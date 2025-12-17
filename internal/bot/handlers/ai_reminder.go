@@ -35,12 +35,25 @@ func (h *Handlers) handleAIListReminderResult(ctx context.Context, msg *tgbotapi
 		return result
 	}
 
-	if len(reminders) == 0 {
+	// 過濾掉已停用和已過期的提醒，只顯示即將到來的
+	now := time.Now()
+	var upcomingReminders []*models.Reminder
+	for _, r := range reminders {
+		if !r.Enabled {
+			continue
+		}
+		// 保留：沒有設定時間的、時間還沒到的、或有重複規則的（會有下次提醒）
+		if r.RemindAt == nil || r.RemindAt.After(now) || r.RecurrenceRule != "" {
+			upcomingReminders = append(upcomingReminders, r)
+		}
+	}
+
+	if len(upcomingReminders) == 0 {
 		var result string
 		if keyword != "" {
-			result = fmt.Sprintf("找不到包含「%s」的提醒", keyword)
+			result = fmt.Sprintf("找不到包含「%s」的即將到來提醒", keyword)
 		} else {
-			result = "目前沒有提醒"
+			result = "目前沒有即將到來的提醒"
 		}
 		if sendMsg {
 			h.sendMessage(msg.Chat.ID, result)
@@ -52,20 +65,15 @@ func (h *Handlers) handleAIListReminderResult(ctx context.Context, msg *tgbotapi
 	if keyword != "" {
 		sb.WriteString(fmt.Sprintf("提醒搜尋結果 (關鍵字: %s)\n\n", keyword))
 	} else {
-		sb.WriteString("提醒列表\n\n")
+		sb.WriteString("即將到來的提醒\n\n")
 	}
-	for _, r := range reminders {
-		status := "啟用"
-		if !r.Enabled {
-			status = "停用"
-		}
-
+	for _, r := range upcomingReminders {
 		timeStr := "未設定"
 		if r.RemindAt != nil {
 			timeStr = r.RemindAt.Format("2006-01-02 15:04")
 		}
 
-		sb.WriteString(fmt.Sprintf("[%s] %d. %s\n", status, r.ReminderID, r.Messages))
+		sb.WriteString(fmt.Sprintf("%d. %s\n", r.ReminderID, r.Messages))
 		sb.WriteString(fmt.Sprintf("   時間: %s\n\n", timeStr))
 	}
 
