@@ -45,6 +45,21 @@ func New(token string, db *database.DB, aiClient *ai.Client, devMode bool) (*Bot
 func (b *Bot) Start(ctx context.Context) error {
 	log.Printf("Authorized on account %s", b.api.Self.UserName)
 
+	// 設定 Bot Menu Commands
+	commands := []tgbotapi.BotCommand{
+		{Command: "todos", Description: "📋 查看待辦事項"},
+		{Command: "reminders", Description: "⏰ 查看提醒"},
+		{Command: "events", Description: "📅 查看行事曆"},
+		{Command: "memos", Description: "📝 查看備忘錄"},
+		{Command: "balance", Description: "💰 查看收支餘額"},
+		{Command: "settings", Description: "⚙️ 設定"},
+		{Command: "help", Description: "❓ 使用說明"},
+	}
+	setCommandsConfig := tgbotapi.NewSetMyCommands(commands...)
+	if _, err := b.api.Request(setCommandsConfig); err != nil {
+		log.Printf("Failed to set bot commands: %v", err)
+	}
+
 	u := tgbotapi.NewUpdate(0)
 	u.Timeout = 60
 
