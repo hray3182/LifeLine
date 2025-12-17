@@ -12,6 +12,8 @@ type Reminder struct {
 	RemindAt       *time.Time `json:"remind_at"` // Next scheduled reminder time
 	Description    string     `json:"description"`
 	Tags           string     `json:"tags"`
+	NotifiedAt     *time.Time `json:"notified_at"`     // Last notification time for this reminder
+	AcknowledgedAt *time.Time `json:"acknowledged_at"` // When user confirmed the reminder
 	CreatedAt      time.Time  `json:"created_at"`
 }
 

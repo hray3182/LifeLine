@@ -12,6 +12,7 @@ import (
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/hray3182/LifeLine/internal/ai"
+	"github.com/hray3182/LifeLine/internal/format"
 	"github.com/hray3182/LifeLine/internal/repository"
 )
 
@@ -132,7 +133,7 @@ func (h *Handlers) HandleCallbackQuery(ctx context.Context, callback *tgbotapi.C
 		log.Printf("Failed to answer callback: %v", err)
 	}
 
-	// Parse callback data: "confirm:userID", "cancel:userID", or "option:userID:index"
+	// Parse callback data: "confirm:userID", "cancel:userID", "option:userID:index", or "remind_ack:reminderID"
 	parts := strings.Split(callback.Data, ":")
 	if len(parts) < 2 {
 		h.debug("HandleCallbackQuery: invalid callback data format", "parts", len(parts))
@@ -140,6 +141,13 @@ func (h *Handlers) HandleCallbackQuery(ctx context.Context, callback *tgbotapi.C
 	}
 
 	action := parts[0]
+
+	// Handle reminder acknowledgement separately (different format)
+	if action == "remind_ack" {
+		h.handleReminderAcknowledge(ctx, callback, parts[1])
+		return
+	}
+
 	userID, err := strconv.ParseInt(parts[1], 10, 64)
 	if err != nil {
 		h.debug("HandleCallbackQuery: failed to parse userID", "error", err)
@@ -298,16 +306,18 @@ func (h *Handlers) answerCallbackWithAlert(callbackID string, text string) {
 }
 
 func (h *Handlers) editMessageText(chatID int64, messageID int, text string) {
-	edit := tgbotapi.NewEditMessageText(chatID, messageID, text)
-	edit.ParseMode = "Markdown"
+	parsed := format.ParseMarkdown(text)
+	edit := tgbotapi.NewEditMessageText(chatID, messageID, parsed.Text)
+	edit.Entities = parsed.Entities
 	if _, err := h.api.Send(edit); err != nil {
 		log.Printf("Failed to edit message: %v", err)
 	}
 }
 
 func (h *Handlers) sendMessage(chatID int64, text string) {
-	msg := tgbotapi.NewMessage(chatID, text)
-	msg.ParseMode = "Markdown"
+	parsed := format.ParseMarkdown(text)
+	msg := tgbotapi.NewMessage(chatID, parsed.Text)
+	msg.Entities = parsed.Entities
 	if _, err := h.api.Send(msg); err != nil {
 		log.Printf("Failed to send message: %v", err)
 	}
@@ -335,27 +345,27 @@ func (h *Handlers) handleStart(ctx context.Context, msg *tgbotapi.Message) {
 }
 
 func (h *Handlers) handleHelp(ctx context.Context, msg *tgbotapi.Message) {
-	text := `📖 *指令列表*
+	text := `📖 **指令列表**
 
-*備忘錄*
+**備忘錄**
 /memo <內容> - 新增備忘錄
 /memos - 查看備忘錄列表
 
-*待辦事項*
+**待辦事項**
 /todo <標題> - 新增待辦
 /todos - 查看待辦列表
 /done <編號> - 完成待辦
 
-*提醒*
+**提醒**
 /remind <時間> <訊息> - 設定提醒
 /reminders - 查看提醒列表
 
-*記帳*
+**記帳**
 /expense <金額> <說明> - 記錄支出
 /income <金額> <說明> - 記錄收入
 /balance - 查看收支統計
 
-*行事曆*
+**行事曆**
 /event <標題> <時間> - 新增事件
 /events - 查看近期事件
 

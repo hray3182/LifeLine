@@ -37,6 +37,30 @@ func NextOccurrence(ruleStr string, dtstart time.Time, after time.Time) (*time.T
 	return &next, nil
 }
 
+// NextOccurrenceStrict returns the next occurrence strictly after the given time
+// Use this when you need to skip the current occurrence
+func NextOccurrenceStrict(ruleStr string, dtstart time.Time, after time.Time) (*time.Time, error) {
+	rule, err := ParseRRule(ruleStr, dtstart)
+	if err != nil {
+		return nil, err
+	}
+
+	next := rule.After(after, false)
+	if next.IsZero() {
+		return nil, nil
+	}
+
+	// Keep searching until we find a time strictly after 'after'
+	for !next.After(after) {
+		next = rule.After(next, false)
+		if next.IsZero() {
+			return nil, nil
+		}
+	}
+
+	return &next, nil
+}
+
 // NextOccurrences returns the next n occurrences after the given time
 func NextOccurrences(ruleStr string, dtstart time.Time, after time.Time, count int) ([]time.Time, error) {
 	rule, err := ParseRRule(ruleStr, dtstart)

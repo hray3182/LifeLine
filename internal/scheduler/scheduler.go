@@ -7,19 +7,18 @@ import (
 	"time"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
+	"github.com/hray3182/LifeLine/internal/format"
 	"github.com/hray3182/LifeLine/internal/repository"
 	"github.com/hray3182/LifeLine/internal/rrule"
 )
 
 type Scheduler struct {
-	api               *tgbotapi.BotAPI
-	reminderRepo      *repository.ReminderRepository
-	eventRepo         *repository.EventRepository
-	todoRepo          *repository.TodoRepository
-	checkInterval     time.Duration
-	notifiedReminders map[int]bool
-	notifiedEvents    map[int]bool
-	notifyCh          chan struct{}
+	api           *tgbotapi.BotAPI
+	reminderRepo  *repository.ReminderRepository
+	eventRepo     *repository.EventRepository
+	todoRepo      *repository.TodoRepository
+	checkInterval time.Duration
+	notifyCh      chan struct{}
 }
 
 func New(
@@ -29,14 +28,12 @@ func New(
 	todoRepo *repository.TodoRepository,
 ) *Scheduler {
 	return &Scheduler{
-		api:               api,
-		reminderRepo:      reminderRepo,
-		eventRepo:         eventRepo,
-		todoRepo:          todoRepo,
-		checkInterval:     1 * time.Minute,
-		notifiedReminders: make(map[int]bool),
-		notifiedEvents:    make(map[int]bool),
-		notifyCh:          make(chan struct{}, 1),
+		api:           api,
+		reminderRepo:  reminderRepo,
+		eventRepo:     eventRepo,
+		todoRepo:      todoRepo,
+		checkInterval: 1 * time.Minute,
+		notifyCh:      make(chan struct{}, 1),
 	}
 }
 
@@ -93,13 +90,8 @@ func (s *Scheduler) checkReminders(ctx context.Context) {
 	}
 
 	for _, reminder := range reminders {
-		// Skip if already notified
-		if s.notifiedReminders[reminder.ReminderID] {
-			continue
-		}
-
 		// Send notification
-		text := "⏰ *提醒*\n\n" + reminder.Messages
+		text := "⏰ **提醒**\n\n" + reminder.Messages
 		if reminder.Description != "" {
 			text += "\n\n" + reminder.Description
 		}
@@ -107,37 +99,27 @@ func (s *Scheduler) checkReminders(ctx context.Context) {
 			text += "\n\n🔄 " + rrule.HumanReadableChinese(reminder.RecurrenceRule)
 		}
 
-		msg := tgbotapi.NewMessage(reminder.UserID, text)
-		msg.ParseMode = "Markdown"
+		parsed := format.ParseMarkdown(text)
+		msg := tgbotapi.NewMessage(reminder.UserID, parsed.Text)
+		msg.Entities = parsed.Entities
+
+		// Add confirm button
+		confirmButton := tgbotapi.NewInlineKeyboardButtonData(
+			"✅ 確認",
+			fmt.Sprintf("remind_ack:%d", reminder.ReminderID),
+		)
+		msg.ReplyMarkup = tgbotapi.NewInlineKeyboardMarkup(
+			tgbotapi.NewInlineKeyboardRow(confirmButton),
+		)
+
 		if _, err := s.api.Send(msg); err != nil {
 			log.Printf("Failed to send reminder notification: %v", err)
 			continue
 		}
 
-		s.notifiedReminders[reminder.ReminderID] = true
+		// Mark as notified in database (will keep sending until user confirms)
+		s.reminderRepo.SetNotifiedAt(ctx, reminder.ReminderID, &now)
 		log.Printf("Sent reminder %d to user %d", reminder.ReminderID, reminder.UserID)
-
-		// Handle recurrence or disable
-		if reminder.RecurrenceRule == "" || reminder.Dtstart == nil {
-			// One-time reminder, disable it
-			s.reminderRepo.SetEnabled(ctx, reminder.ReminderID, reminder.UserID, false)
-		} else {
-			// Calculate next occurrence based on recurrence rule
-			next, err := rrule.NextOccurrence(reminder.RecurrenceRule, *reminder.Dtstart, now)
-			if err != nil {
-				log.Printf("Failed to calculate next occurrence for reminder %d: %v", reminder.ReminderID, err)
-				s.reminderRepo.SetEnabled(ctx, reminder.ReminderID, reminder.UserID, false)
-			} else if next == nil {
-				// No more occurrences, disable it
-				s.reminderRepo.SetEnabled(ctx, reminder.ReminderID, reminder.UserID, false)
-			} else {
-				// Update remind_at to next occurrence
-				s.reminderRepo.UpdateRemindAt(ctx, reminder.ReminderID, next)
-				// Clear the notified flag so it can be sent again
-				delete(s.notifiedReminders, reminder.ReminderID)
-				log.Printf("Scheduled next reminder %d at %s", reminder.ReminderID, next.Format("2006-01-02 15:04"))
-			}
-		}
 	}
 }
 
@@ -150,11 +132,6 @@ func (s *Scheduler) checkEvents(ctx context.Context) {
 	}
 
 	for _, event := range events {
-		// Skip if already notified
-		if s.notifiedEvents[event.EventID] {
-			continue
-		}
-
 		if event.NextOccurrence == nil {
 			continue
 		}
@@ -163,8 +140,8 @@ func (s *Scheduler) checkEvents(ctx context.Context) {
 		timeUntil := time.Until(*event.NextOccurrence)
 		minutesUntil := int(timeUntil.Minutes())
 
-		text := "📅 *即將開始的事件*\n\n"
-		text += "*" + event.Title + "*\n"
+		text := "📅 **即將開始的事件**\n\n"
+		text += "**" + event.Title + "**\n"
 		text += "⏰ " + event.NextOccurrence.Format("15:04")
 
 		if minutesUntil > 0 {
@@ -183,19 +160,17 @@ func (s *Scheduler) checkEvents(ctx context.Context) {
 			text += "\n\n" + event.Description
 		}
 
-		msg := tgbotapi.NewMessage(event.UserID, text)
-		msg.ParseMode = "Markdown"
+		parsed := format.ParseMarkdown(text)
+		msg := tgbotapi.NewMessage(event.UserID, parsed.Text)
+		msg.Entities = parsed.Entities
 		if _, err := s.api.Send(msg); err != nil {
 			log.Printf("Failed to send event notification: %v", err)
 			continue
 		}
 
-		s.notifiedEvents[event.EventID] = true
+		// Mark as notified in database
+		s.eventRepo.SetNotifiedAt(ctx, event.EventID, &now)
 		log.Printf("Sent event notification %d to user %d", event.EventID, event.UserID)
-
-		// For recurring events, schedule next occurrence after the current one passes
-		// We need to wait until after the event starts before calculating the next one
-		// This will be done in a separate check after the event time passes
 	}
 
 	// Check for events that have passed and need next occurrence calculated
@@ -213,9 +188,8 @@ func (s *Scheduler) updateRecurringEvents(ctx context.Context, now time.Time) {
 	for _, event := range events {
 		// Event time has passed
 		if event.RecurrenceRule == "" || event.Dtstart == nil {
-			// One-time event, clear next_occurrence
+			// One-time event, clear next_occurrence (this also clears notified_at)
 			s.eventRepo.UpdateNextOccurrence(ctx, event.EventID, nil)
-			delete(s.notifiedEvents, event.EventID)
 		} else {
 			// Calculate next occurrence
 			next, err := rrule.NextOccurrence(event.RecurrenceRule, *event.Dtstart, now)
@@ -223,8 +197,8 @@ func (s *Scheduler) updateRecurringEvents(ctx context.Context, now time.Time) {
 				log.Printf("Failed to calculate next occurrence for event %d: %v", event.EventID, err)
 				s.eventRepo.UpdateNextOccurrence(ctx, event.EventID, nil)
 			} else {
+				// Update next_occurrence (this also clears notified_at)
 				s.eventRepo.UpdateNextOccurrence(ctx, event.EventID, next)
-				delete(s.notifiedEvents, event.EventID)
 				if next != nil {
 					log.Printf("Scheduled next event %d at %s", event.EventID, next.Format("2006-01-02 15:04"))
 				}

@@ -71,7 +71,7 @@ func (h *Handlers) handleEventList(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📅 *近期事件*\n\n")
+	sb.WriteString("📅 **近期事件**\n\n")
 	for _, event := range events {
 		timeStr := "未設定時間"
 		if event.NextOccurrence != nil {
@@ -80,7 +80,7 @@ func (h *Handlers) handleEventList(ctx context.Context, msg *tgbotapi.Message) {
 			timeStr = event.Dtstart.Format("01/02 15:04")
 		}
 
-		sb.WriteString(fmt.Sprintf("*%d.* %s\n", event.EventID, event.Title))
+		sb.WriteString(fmt.Sprintf("**%d.** %s\n", event.EventID, event.Title))
 		sb.WriteString(fmt.Sprintf("   🕐 %s\n", timeStr))
 		if event.Duration > 0 {
 			sb.WriteString(fmt.Sprintf("   ⏱ %d 分鐘\n", event.Duration))

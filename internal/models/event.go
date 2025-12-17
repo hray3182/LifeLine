@@ -13,6 +13,7 @@ type Event struct {
 	NotificationMinutes int        `json:"notification_minutes"` // Minutes before to notify
 	RecurrenceRule      string     `json:"recurrence_rule"`      // RFC 5545 RRULE
 	Tags                string     `json:"tags"`
+	NotifiedAt          *time.Time `json:"notified_at"` // Last notification time for this occurrence
 	CreatedAt           time.Time  `json:"created_at"`
 }
 

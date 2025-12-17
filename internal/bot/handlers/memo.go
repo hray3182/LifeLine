@@ -42,13 +42,13 @@ func (h *Handlers) handleMemoList(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📝 *備忘錄列表*\n\n")
+	sb.WriteString("📝 **備忘錄列表**\n\n")
 	for _, memo := range memos {
 		content := memo.Content
 		if len(content) > 50 {
 			content = content[:50] + "..."
 		}
-		sb.WriteString(fmt.Sprintf("*%d.* %s\n", memo.MemoID, content))
+		sb.WriteString(fmt.Sprintf("**%d.** %s\n", memo.MemoID, content))
 		sb.WriteString(fmt.Sprintf("   _建立於 %s_\n\n", memo.CreatedAt.Format("2006-01-02 15:04")))
 	}
 

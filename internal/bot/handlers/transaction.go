@@ -97,7 +97,7 @@ func (h *Handlers) handleBalanceWithResult(ctx context.Context, msg *tgbotapi.Me
 	balance := income - expense
 
 	var sb strings.Builder
-	sb.WriteString(fmt.Sprintf("📊 *%d年%d月 收支統計*\n\n", now.Year(), now.Month()))
+	sb.WriteString(fmt.Sprintf("📊 **%d年%d月 收支統計**\n\n", now.Year(), now.Month()))
 	sb.WriteString(fmt.Sprintf("💰 收入: %.2f\n", income))
 	sb.WriteString(fmt.Sprintf("💸 支出: %.2f\n", expense))
 	sb.WriteString(fmt.Sprintf("━━━━━━━━━━\n"))

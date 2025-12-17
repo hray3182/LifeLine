@@ -44,7 +44,7 @@ func (h *Handlers) handleTodoList(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	var sb strings.Builder
-	sb.WriteString("📋 *待辦事項列表*\n\n")
+	sb.WriteString("📋 **待辦事項列表**\n\n")
 	for _, todo := range todos {
 		status := "⬜"
 		if todo.IsCompleted() {
@@ -56,7 +56,7 @@ func (h *Handlers) handleTodoList(ctx context.Context, msg *tgbotapi.Message) {
 			title = title[:40] + "..."
 		}
 
-		sb.WriteString(fmt.Sprintf("%s *%d.* %s", status, todo.TodoID, title))
+		sb.WriteString(fmt.Sprintf("%s **%d.** %s", status, todo.TodoID, title))
 
 		if todo.DueTime != nil {
 			sb.WriteString(fmt.Sprintf("\n   📅 %s", todo.DueTime.Format("2006-01-02 15:04")))

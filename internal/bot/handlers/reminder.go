@@ -3,6 +3,7 @@ package handlers
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"strings"
 	"time"
 
@@ -65,7 +66,7 @@ func (h *Handlers) handleReminderList(ctx context.Context, msg *tgbotapi.Message
 	}
 
 	var sb strings.Builder
-	sb.WriteString("⏰ *提醒列表*\n\n")
+	sb.WriteString("⏰ **提醒列表**\n\n")
 	for _, r := range reminders {
 		status := "✅"
 		if !r.Enabled {
@@ -77,7 +78,7 @@ func (h *Handlers) handleReminderList(ctx context.Context, msg *tgbotapi.Message
 			timeStr = r.RemindAt.Format("2006-01-02 15:04")
 		}
 
-		sb.WriteString(fmt.Sprintf("%s *%d.* %s\n", status, r.ReminderID, r.Messages))
+		sb.WriteString(fmt.Sprintf("%s **%d.** %s\n", status, r.ReminderID, r.Messages))
 		sb.WriteString(fmt.Sprintf("   📅 %s\n\n", timeStr))
 	}
 
@@ -100,6 +101,56 @@ func parseTimeToday(timeStr string) (time.Time, error) {
 	}
 
 	return result, nil
+}
+
+func (h *Handlers) handleReminderAcknowledge(ctx context.Context, callback *tgbotapi.CallbackQuery, reminderIDStr string) {
+	reminderID, err := strconv.Atoi(reminderIDStr)
+	if err != nil {
+		h.debug("handleReminderAcknowledge: invalid reminder ID", "error", err)
+		return
+	}
+
+	// Get reminder
+	reminder, err := h.repos.Reminder.GetByIDOnly(ctx, reminderID)
+	if err != nil {
+		h.debug("handleReminderAcknowledge: reminder not found", "error", err)
+		h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID, "⚠️ 找不到此提醒")
+		return
+	}
+
+	// Verify the callback is from the correct user
+	if callback.From.ID != reminder.UserID {
+		h.answerCallbackWithAlert(callback.ID, "這不是你的提醒")
+		return
+	}
+
+	now := time.Now()
+
+	// Mark as acknowledged
+	if err := h.repos.Reminder.SetAcknowledgedAt(ctx, reminderID, &now); err != nil {
+		h.debug("handleReminderAcknowledge: failed to set acknowledged_at", "error", err)
+		return
+	}
+
+	// Handle recurrence: calculate next occurrence
+	if reminder.IsRecurring() && reminder.Dtstart != nil {
+		// Use strict version to get the next occurrence after now
+		next, err := rrule.NextOccurrenceStrict(reminder.RecurrenceRule, *reminder.Dtstart, now)
+		if err != nil || next == nil {
+			// No more occurrences, disable it
+			h.repos.Reminder.SetEnabled(ctx, reminderID, reminder.UserID, false)
+		} else {
+			// Update remind_at to next occurrence (this clears acknowledged_at and notified_at)
+			h.repos.Reminder.UpdateRemindAt(ctx, reminderID, next)
+		}
+	} else {
+		// One-time reminder, disable it
+		h.repos.Reminder.SetEnabled(ctx, reminderID, reminder.UserID, false)
+	}
+
+	// Update message to show acknowledged
+	h.editMessageText(callback.Message.Chat.ID, callback.Message.MessageID,
+		fmt.Sprintf("✅ 已確認提醒\n\n%s", reminder.Messages))
 }
 
 func (h *Handlers) CreateReminder(ctx context.Context, userID int64, message string, dtstart *time.Time, recurrenceRule string) (*models.Reminder, error) {
