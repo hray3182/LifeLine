@@ -9,6 +9,7 @@ import (
 	"strconv"
 	"strings"
 	"time"
+	"unicode/utf8"
 
 	tgbotapi "github.com/go-telegram-bot-api/telegram-bot-api/v5"
 	"github.com/hray3182/LifeLine/internal/ai"
@@ -324,6 +325,10 @@ func (h *Handlers) editMessageText(chatID int64, messageID int, text string) {
 }
 
 func (h *Handlers) sendMessage(chatID int64, text string) {
+	// 確保文字是有效的 UTF-8
+	if !utf8.ValidString(text) {
+		text = strings.ToValidUTF8(text, "")
+	}
 	parsed := format.ParseMarkdown(text)
 	msg := tgbotapi.NewMessage(chatID, parsed.Text)
 	msg.Entities = parsed.Entities
