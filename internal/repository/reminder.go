@@ -18,17 +18,17 @@ func NewReminderRepository(db *database.DB) *ReminderRepository {
 
 func (r *ReminderRepository) Create(ctx context.Context, reminder *models.Reminder) error {
 	return r.db.Pool.QueryRow(ctx,
-		`INSERT INTO reminders (user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at)
-		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
+		`INSERT INTO reminders (user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, last_message_id)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
 		 RETURNING reminders_id, created_at`,
 		reminder.UserID, reminder.Enabled, reminder.RecurrenceRule, reminder.Dtstart, reminder.Messages,
-		reminder.RemindAt, reminder.Description, reminder.Tags, reminder.NotifiedAt, reminder.AcknowledgedAt,
+		reminder.RemindAt, reminder.Description, reminder.Tags, reminder.NotifiedAt, reminder.AcknowledgedAt, reminder.LastMessageID,
 	).Scan(&reminder.ReminderID, &reminder.CreatedAt)
 }
 
 func (r *ReminderRepository) GetByUserID(ctx context.Context, userID int64) ([]*models.Reminder, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, created_at
+		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, last_message_id, created_at
 		 FROM reminders WHERE user_id = $1 ORDER BY remind_at ASC NULLS LAST`,
 		userID,
 	)
@@ -41,7 +41,7 @@ func (r *ReminderRepository) GetByUserID(ctx context.Context, userID int64) ([]*
 	for rows.Next() {
 		reminder := &models.Reminder{}
 		if err := rows.Scan(&reminder.ReminderID, &reminder.UserID, &reminder.Enabled, &reminder.RecurrenceRule,
-			&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.CreatedAt); err != nil {
+			&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.LastMessageID, &reminder.CreatedAt); err != nil {
 			return nil, err
 		}
 		reminders = append(reminders, reminder)
@@ -52,11 +52,11 @@ func (r *ReminderRepository) GetByUserID(ctx context.Context, userID int64) ([]*
 func (r *ReminderRepository) GetByID(ctx context.Context, reminderID int, userID int64) (*models.Reminder, error) {
 	reminder := &models.Reminder{}
 	err := r.db.Pool.QueryRow(ctx,
-		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, created_at
+		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, last_message_id, created_at
 		 FROM reminders WHERE reminders_id = $1 AND user_id = $2`,
 		reminderID, userID,
 	).Scan(&reminder.ReminderID, &reminder.UserID, &reminder.Enabled, &reminder.RecurrenceRule,
-		&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.CreatedAt)
+		&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.LastMessageID, &reminder.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -66,11 +66,11 @@ func (r *ReminderRepository) GetByID(ctx context.Context, reminderID int, userID
 func (r *ReminderRepository) GetByIDOnly(ctx context.Context, reminderID int) (*models.Reminder, error) {
 	reminder := &models.Reminder{}
 	err := r.db.Pool.QueryRow(ctx,
-		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, created_at
+		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, last_message_id, created_at
 		 FROM reminders WHERE reminders_id = $1`,
 		reminderID,
 	).Scan(&reminder.ReminderID, &reminder.UserID, &reminder.Enabled, &reminder.RecurrenceRule,
-		&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.CreatedAt)
+		&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.LastMessageID, &reminder.CreatedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -79,18 +79,18 @@ func (r *ReminderRepository) GetByIDOnly(ctx context.Context, reminderID int) (*
 
 func (r *ReminderRepository) Update(ctx context.Context, reminder *models.Reminder) error {
 	_, err := r.db.Pool.Exec(ctx,
-		`UPDATE reminders SET enabled = $1, recurrence_rule = $2, dtstart = $3, messages = $4, remind_at = $5, description = $6, tags = $7, notified_at = $8, acknowledged_at = $9
-		 WHERE reminders_id = $10 AND user_id = $11`,
+		`UPDATE reminders SET enabled = $1, recurrence_rule = $2, dtstart = $3, messages = $4, remind_at = $5, description = $6, tags = $7, notified_at = $8, acknowledged_at = $9, last_message_id = $10
+		 WHERE reminders_id = $11 AND user_id = $12`,
 		reminder.Enabled, reminder.RecurrenceRule, reminder.Dtstart, reminder.Messages, reminder.RemindAt,
-		reminder.Description, reminder.Tags, reminder.NotifiedAt, reminder.AcknowledgedAt, reminder.ReminderID, reminder.UserID,
+		reminder.Description, reminder.Tags, reminder.NotifiedAt, reminder.AcknowledgedAt, reminder.LastMessageID, reminder.ReminderID, reminder.UserID,
 	)
 	return err
 }
 
 func (r *ReminderRepository) UpdateRemindAt(ctx context.Context, reminderID int, remindAt *time.Time) error {
-	// Clear notified_at and acknowledged_at when updating remind_at to allow notification for the new time
+	// Clear notified_at, acknowledged_at, and last_message_id when updating remind_at to allow notification for the new time
 	_, err := r.db.Pool.Exec(ctx,
-		`UPDATE reminders SET remind_at = $1, notified_at = NULL, acknowledged_at = NULL WHERE reminders_id = $2`,
+		`UPDATE reminders SET remind_at = $1, notified_at = NULL, acknowledged_at = NULL, last_message_id = NULL WHERE reminders_id = $2`,
 		remindAt, reminderID,
 	)
 	return err
@@ -100,6 +100,14 @@ func (r *ReminderRepository) SetNotifiedAt(ctx context.Context, reminderID int, 
 	_, err := r.db.Pool.Exec(ctx,
 		`UPDATE reminders SET notified_at = $1 WHERE reminders_id = $2`,
 		notifiedAt, reminderID,
+	)
+	return err
+}
+
+func (r *ReminderRepository) SetLastMessageID(ctx context.Context, reminderID int, messageID int) error {
+	_, err := r.db.Pool.Exec(ctx,
+		`UPDATE reminders SET last_message_id = $1 WHERE reminders_id = $2`,
+		messageID, reminderID,
 	)
 	return err
 }
@@ -127,7 +135,7 @@ func (r *ReminderRepository) GetPendingReminders(ctx context.Context, until time
 	// 3. Are NOT acknowledged yet
 	// 4. Either never notified OR notified more than 1 minute ago (cooldown)
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, created_at
+		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, last_message_id, created_at
 		 FROM reminders
 		 WHERE enabled = true
 		 AND remind_at IS NOT NULL
@@ -146,7 +154,7 @@ func (r *ReminderRepository) GetPendingReminders(ctx context.Context, until time
 	for rows.Next() {
 		reminder := &models.Reminder{}
 		if err := rows.Scan(&reminder.ReminderID, &reminder.UserID, &reminder.Enabled, &reminder.RecurrenceRule,
-			&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.CreatedAt); err != nil {
+			&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.LastMessageID, &reminder.CreatedAt); err != nil {
 			return nil, err
 		}
 		reminders = append(reminders, reminder)
@@ -164,7 +172,7 @@ func (r *ReminderRepository) SetEnabled(ctx context.Context, reminderID int, use
 
 func (r *ReminderRepository) Search(ctx context.Context, userID int64, keyword string) ([]*models.Reminder, error) {
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, created_at
+		`SELECT reminders_id, user_id, enabled, recurrence_rule, dtstart, messages, remind_at, description, tags, notified_at, acknowledged_at, last_message_id, created_at
 		 FROM reminders WHERE user_id = $1 AND (messages ILIKE $2 OR description ILIKE $2 OR tags ILIKE $2)
 		 ORDER BY remind_at ASC NULLS LAST`,
 		userID, "%"+keyword+"%",
@@ -178,7 +186,7 @@ func (r *ReminderRepository) Search(ctx context.Context, userID int64, keyword s
 	for rows.Next() {
 		reminder := &models.Reminder{}
 		if err := rows.Scan(&reminder.ReminderID, &reminder.UserID, &reminder.Enabled, &reminder.RecurrenceRule,
-			&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.CreatedAt); err != nil {
+			&reminder.Dtstart, &reminder.Messages, &reminder.RemindAt, &reminder.Description, &reminder.Tags, &reminder.NotifiedAt, &reminder.AcknowledgedAt, &reminder.LastMessageID, &reminder.CreatedAt); err != nil {
 			return nil, err
 		}
 		reminders = append(reminders, reminder)

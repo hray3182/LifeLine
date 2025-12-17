@@ -90,6 +90,15 @@ func (s *Scheduler) checkReminders(ctx context.Context) {
 	}
 
 	for _, reminder := range reminders {
+		// Delete previous message if exists (to avoid flooding)
+		if reminder.LastMessageID != nil {
+			deleteMsg := tgbotapi.NewDeleteMessage(reminder.UserID, *reminder.LastMessageID)
+			if _, err := s.api.Request(deleteMsg); err != nil {
+				log.Printf("Failed to delete old reminder message %d: %v", *reminder.LastMessageID, err)
+				// Continue anyway, the old message might have been deleted by user
+			}
+		}
+
 		// Send notification
 		text := "⏰ **提醒**\n\n" + reminder.Messages
 		if reminder.Description != "" {
@@ -112,14 +121,16 @@ func (s *Scheduler) checkReminders(ctx context.Context) {
 			tgbotapi.NewInlineKeyboardRow(confirmButton),
 		)
 
-		if _, err := s.api.Send(msg); err != nil {
+		sentMsg, err := s.api.Send(msg)
+		if err != nil {
 			log.Printf("Failed to send reminder notification: %v", err)
 			continue
 		}
 
-		// Mark as notified in database (will keep sending until user confirms)
+		// Save message ID and mark as notified in database
+		s.reminderRepo.SetLastMessageID(ctx, reminder.ReminderID, sentMsg.MessageID)
 		s.reminderRepo.SetNotifiedAt(ctx, reminder.ReminderID, &now)
-		log.Printf("Sent reminder %d to user %d", reminder.ReminderID, reminder.UserID)
+		log.Printf("Sent reminder %d to user %d (msg_id=%d)", reminder.ReminderID, reminder.UserID, sentMsg.MessageID)
 	}
 }
 

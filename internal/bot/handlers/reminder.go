@@ -131,21 +131,26 @@ func (h *Handlers) handleReminderAcknowledge(ctx context.Context, callback *tgbo
 		h.debug("handleReminderAcknowledge: failed to set acknowledged_at", "error", err)
 		return
 	}
+	h.debug("handleReminderAcknowledge: acknowledged", "reminder_id", reminderID)
 
 	// Handle recurrence: calculate next occurrence
 	if reminder.IsRecurring() && reminder.Dtstart != nil {
 		// Use strict version to get the next occurrence after now
 		next, err := rrule.NextOccurrenceStrict(reminder.RecurrenceRule, *reminder.Dtstart, now)
+		h.debug("handleReminderAcknowledge: recurring", "next", next, "err", err)
 		if err != nil || next == nil {
 			// No more occurrences, disable it
 			h.repos.Reminder.SetEnabled(ctx, reminderID, reminder.UserID, false)
+			h.debug("handleReminderAcknowledge: disabled (no more occurrences)")
 		} else {
 			// Update remind_at to next occurrence (this clears acknowledged_at and notified_at)
 			h.repos.Reminder.UpdateRemindAt(ctx, reminderID, next)
+			h.debug("handleReminderAcknowledge: scheduled next", "next", next.Format("2006-01-02 15:04"))
 		}
 	} else {
 		// One-time reminder, disable it
 		h.repos.Reminder.SetEnabled(ctx, reminderID, reminder.UserID, false)
+		h.debug("handleReminderAcknowledge: disabled (one-time)")
 	}
 
 	// Update message to show acknowledged

@@ -18,7 +18,14 @@ func ParseRRule(ruleStr string, dtstart time.Time) (*rrule.RRule, error) {
 		return nil, fmt.Errorf("failed to parse RRULE: %w", err)
 	}
 
-	opt.Dtstart = dtstart
+	// Database stores TIMESTAMP without timezone, but pgx reads it as UTC.
+	// The actual values are local time, so we need to reinterpret them.
+	// Create a new time with the same clock values but in local timezone.
+	opt.Dtstart = time.Date(
+		dtstart.Year(), dtstart.Month(), dtstart.Day(),
+		dtstart.Hour(), dtstart.Minute(), dtstart.Second(), dtstart.Nanosecond(),
+		time.Local,
+	)
 	return rrule.NewRRule(*opt)
 }
 
@@ -45,20 +52,24 @@ func NextOccurrenceStrict(ruleStr string, dtstart time.Time, after time.Time) (*
 		return nil, err
 	}
 
-	next := rule.After(after, false)
-	if next.IsZero() {
-		return nil, nil
-	}
+	// Ensure 'after' is in local timezone for consistent comparison
+	afterLocal := after.In(time.Local)
 
 	// Keep searching until we find a time strictly after 'after'
-	for !next.After(after) {
-		next = rule.After(next, false)
+	current := afterLocal
+	for i := 0; i < 1000; i++ { // Safety limit
+		next := rule.After(current, false)
 		if next.IsZero() {
 			return nil, nil
 		}
+		if next.After(afterLocal) {
+			return &next, nil
+		}
+		// Move forward to search for the next one
+		current = next.Add(time.Second)
 	}
 
-	return &next, nil
+	return nil, nil
 }
 
 // NextOccurrences returns the next n occurrences after the given time

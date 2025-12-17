@@ -14,6 +14,7 @@ type Reminder struct {
 	Tags           string     `json:"tags"`
 	NotifiedAt     *time.Time `json:"notified_at"`     // Last notification time for this reminder
 	AcknowledgedAt *time.Time `json:"acknowledged_at"` // When user confirmed the reminder
+	LastMessageID  *int       `json:"last_message_id"` // Last sent message ID for deletion before resend
 	CreatedAt      time.Time  `json:"created_at"`
 }
 
