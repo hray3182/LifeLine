@@ -82,6 +82,9 @@ func main() {
 		log.Fatalf("Failed to create bot: %v", err)
 	}
 
+	// Connect scheduler notification to bot handlers
+	b.SetSchedulerNotify(sched.Notify)
+
 	// Handle graceful shutdown
 	go func() {
 		sigCh := make(chan os.Signal, 1)

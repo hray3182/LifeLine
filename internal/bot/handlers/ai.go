@@ -46,13 +46,9 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	// DEV mode: log incoming message
-	if h.devMode {
-		log.Printf("[DEV] Incoming message from %s (@%s): %s",
-			msg.From.FirstName, msg.From.UserName, msg.Text)
-		if msg.ReplyToMessage != nil {
-			log.Printf("[DEV] ReplyToMessage: %s", msg.ReplyToMessage.Text)
-		}
+	h.debug("Incoming message", "from", msg.From.FirstName, "username", msg.From.UserName, "text", msg.Text)
+	if msg.ReplyToMessage != nil {
+		h.debug("ReplyToMessage", "text", msg.ReplyToMessage.Text)
 	}
 
 	// Check if user is confirming a pending action
@@ -71,9 +67,7 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 				Role:    "assistant",
 				Content: msg.ReplyToMessage.Text,
 			})
-			if h.devMode {
-				log.Printf("[DEV] Added ReplyToMessage to context as assistant message")
-			}
+			h.debug("Added ReplyToMessage to context as assistant message")
 		}
 	}
 
@@ -88,12 +82,9 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 		session.History = session.History[len(session.History)-maxHistoryLen:]
 	}
 
-	// DEV mode: log conversation history
-	if h.devMode {
-		log.Printf("[DEV] Conversation history (%d messages):", len(session.History))
-		for i, m := range session.History {
-			log.Printf("[DEV]   [%d] %s: %s", i, m.Role, truncateString(m.Content, 100))
-		}
+	h.debug("Conversation history", "count", len(session.History))
+	for i, m := range session.History {
+		h.debug("History item", "index", i, "role", m.Role, "content", truncateString(m.Content, 100))
 	}
 
 	// Parse intent with conversation history
@@ -104,19 +95,16 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
-	// DEV mode: log parsed intent
-	if h.devMode {
-		log.Printf("[DEV] Parsed intent: action=%s, entity=%s, confidence=%.2f, needs_confirmation=%v, need_more_info=%v",
-			intent.Action, intent.Entity, intent.Confidence, intent.NeedsConfirmation, intent.NeedMoreInfo)
-		log.Printf("[DEV] Parameters: %v", intent.Parameters)
-		if intent.AIMessage != "" {
-			log.Printf("[DEV] AI Message: %s", intent.AIMessage)
-		}
-		log.Printf("[DEV] Raw response: %s", intent.RawResponse)
-	} else {
-		log.Printf("Parsed intent: action=%s, entity=%s, confidence=%.2f, needs_confirmation=%v, need_more_info=%v",
-			intent.Action, intent.Entity, intent.Confidence, intent.NeedsConfirmation, intent.NeedMoreInfo)
-	}
+	h.debug("Parsed intent",
+		"action", intent.Action,
+		"entity", intent.Entity,
+		"confidence", intent.Confidence,
+		"needs_confirmation", intent.NeedsConfirmation,
+		"need_more_info", intent.NeedMoreInfo,
+		"return_result_to_ai", intent.ReturnResultToAI,
+		"params", intent.Parameters,
+		"ai_message", intent.AIMessage,
+		"raw", intent.RawResponse)
 
 	// Handle low confidence
 	if intent.Confidence < 0.5 {
@@ -161,8 +149,61 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 		return
 	}
 
+	// Handle return_result_to_ai flow: execute tool and let AI process the result
+	if intent.ReturnResultToAI {
+		h.debug("ReturnResultToAI flow", "action", intent.Action)
+
+		// Execute but don't send to user
+		result := h.executeIntentWithResult(ctx, msg, intent)
+		h.debug("Tool result", "result", truncateString(result, 200))
+
+		// Add result to history for AI to process
+		session.History = append(session.History, ai.Message{
+			Role:    "assistant",
+			Content: "[工具執行結果]\n" + result,
+		})
+		h.saveSession(msg.From.ID, session)
+
+		h.debug("Sending tool result to AI for next action")
+
+		// Let AI decide next action based on result
+		nextIntent, err := h.ai.ParseIntentWithHistory(ctx, session.History)
+		if err != nil {
+			log.Printf("Failed to parse next intent: %v", err)
+			h.sendMessage(msg.Chat.ID, "處理失敗，請稍後再試")
+			return
+		}
+
+		h.debug("Next intent after tool result",
+			"action", nextIntent.Action,
+			"entity", nextIntent.Entity,
+			"confidence", nextIntent.Confidence,
+			"needs_confirmation", nextIntent.NeedsConfirmation,
+			"ai_message", truncateString(nextIntent.AIMessage, 100),
+			"raw", nextIntent.RawResponse)
+
+		// Process the next intent (but prevent infinite loop - nextIntent should not have ReturnResultToAI=true)
+		if nextIntent.NeedsConfirmation {
+			h.requestConfirmation(msg.Chat.ID, msg.From.ID, nextIntent)
+			h.clearSession(msg.From.ID)
+			return
+		}
+
+		// If AI just wants to send a message (unknown action with AIMessage)
+		if nextIntent.Action == "unknown" && nextIntent.AIMessage != "" {
+			h.sendMessage(msg.Chat.ID, nextIntent.AIMessage)
+			h.clearSession(msg.From.ID)
+			return
+		}
+
+		// Execute the next intent normally
+		intent = nextIntent
+	}
+
 	// Execute intent and get result
+	h.debug("Executing action", "action", intent.Action, "params", intent.Parameters)
 	result := h.executeIntentWithResult(ctx, msg, intent)
+	h.debug("Action result", "result", truncateString(result, 200))
 
 	// Add execution result to history for AI to process
 	if result != "" {
@@ -173,7 +214,7 @@ func (h *Handlers) handleAIMessage(ctx context.Context, msg *tgbotapi.Message) {
 	}
 
 	// Clear session after successful action (unless it's a list/query action)
-	if !strings.HasPrefix(intent.Action, "list_") && intent.Action != "get_balance" {
+	if !strings.HasPrefix(intent.Action, "list_") && intent.Action != "get_balance" && intent.Action != "query_schedule" {
 		h.clearSession(msg.From.ID)
 	} else {
 		h.saveSession(msg.From.ID, session)
@@ -343,6 +384,7 @@ func (h *Handlers) executeIntentWithResult(ctx context.Context, msg *tgbotapi.Me
 
 // executeSingleAction executes a single action and returns the result
 func (h *Handlers) executeSingleAction(ctx context.Context, msg *tgbotapi.Message, action string, params map[string]string, sendMsg bool) string {
+	h.debug("executeSingleAction", "action", action, "params", params, "sendMsg", sendMsg)
 	var result string
 	switch action {
 	case "create_memo":
@@ -385,6 +427,8 @@ func (h *Handlers) executeSingleAction(ctx context.Context, msg *tgbotapi.Messag
 		result = h.handleAIDeleteEventResult(ctx, msg, params, sendMsg)
 	case "update_event":
 		result = h.handleAIUpdateEventResult(ctx, msg, params, sendMsg)
+	case "query_schedule":
+		result = h.handleQueryScheduleResult(ctx, msg, params, sendMsg)
 	case "unknown":
 		result = "無法識別的操作"
 		if sendMsg {
@@ -673,10 +717,42 @@ func (h *Handlers) handleAIListEvent(ctx context.Context, msg *tgbotapi.Message,
 
 func (h *Handlers) handleAIListEventResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
 	keyword := params["keyword"]
+	dateStr := params["date"]       // specific date: YYYY-MM-DD
+	startDate := params["start_date"] // range start
+	endDate := params["end_date"]     // range end
+
 	var events []*models.Event
 	var err error
 
-	if keyword != "" {
+	if dateStr != "" {
+		// Search by specific date
+		date := parseDateTime(dateStr)
+		if date != nil {
+			// Get start and end of day
+			startOfDay := time.Date(date.Year(), date.Month(), date.Day(), 0, 0, 0, 0, date.Location())
+			endOfDay := startOfDay.Add(24 * time.Hour)
+			events, err = h.repos.Event.GetByDateRange(ctx, msg.From.ID, startOfDay, endOfDay)
+		} else {
+			events, err = h.repos.Event.GetByUserID(ctx, msg.From.ID)
+		}
+	} else if startDate != "" || endDate != "" {
+		// Search by date range
+		now := time.Now()
+		start := now
+		end := now.AddDate(1, 0, 0) // default: 1 year ahead
+
+		if startDate != "" {
+			if parsed := parseDateTime(startDate); parsed != nil {
+				start = time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, parsed.Location())
+			}
+		}
+		if endDate != "" {
+			if parsed := parseDateTime(endDate); parsed != nil {
+				end = time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 23, 59, 59, 0, parsed.Location())
+			}
+		}
+		events, err = h.repos.Event.GetByDateRange(ctx, msg.From.ID, start, end)
+	} else if keyword != "" {
 		events, err = h.repos.Event.Search(ctx, msg.From.ID, keyword)
 	} else {
 		events, err = h.repos.Event.GetByUserID(ctx, msg.From.ID)
@@ -1321,6 +1397,185 @@ func (h *Handlers) handleAIUpdateEventResult(ctx context.Context, msg *tgbotapi.
 		h.sendMessage(msg.Chat.ID, result)
 	}
 	return result
+}
+
+func (h *Handlers) handleQueryScheduleResult(ctx context.Context, msg *tgbotapi.Message, params map[string]string, sendMsg bool) string {
+	dateStr := params["date"]
+	startDateStr := params["start_date"]
+	endDateStr := params["end_date"]
+
+	now := time.Now()
+	loc := now.Location()
+
+	// Determine date range
+	var startTime, endTime time.Time
+	if dateStr != "" {
+		// Specific date
+		if parsed := parseDateTime(dateStr); parsed != nil {
+			startTime = time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, loc)
+			endTime = startTime.Add(24 * time.Hour)
+		} else {
+			startTime = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+			endTime = startTime.Add(24 * time.Hour)
+		}
+	} else if startDateStr != "" || endDateStr != "" {
+		// Date range
+		if startDateStr != "" {
+			if parsed := parseDateTime(startDateStr); parsed != nil {
+				startTime = time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 0, 0, 0, 0, loc)
+			} else {
+				startTime = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+			}
+		} else {
+			startTime = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		}
+		if endDateStr != "" {
+			if parsed := parseDateTime(endDateStr); parsed != nil {
+				endTime = time.Date(parsed.Year(), parsed.Month(), parsed.Day(), 23, 59, 59, 0, loc)
+			} else {
+				endTime = startTime.Add(24 * time.Hour)
+			}
+		} else {
+			endTime = startTime.Add(24 * time.Hour)
+		}
+	} else {
+		// Default: today
+		startTime = time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, loc)
+		endTime = startTime.Add(24 * time.Hour)
+	}
+
+	// Collect data from multiple sources
+	var sb strings.Builder
+
+	// 1. Events in date range
+	events, err := h.repos.Event.GetByDateRange(ctx, msg.From.ID, startTime, endTime)
+	if err == nil && len(events) > 0 {
+		sb.WriteString("【事件】\n")
+		for _, e := range events {
+			timeStr := ""
+			if e.NextOccurrence != nil {
+				timeStr = e.NextOccurrence.Format("15:04")
+			} else if e.Dtstart != nil {
+				timeStr = e.Dtstart.Format("15:04")
+			}
+			sb.WriteString(fmt.Sprintf("• [#%d] %s", e.EventID, e.Title))
+			if timeStr != "" {
+				sb.WriteString(fmt.Sprintf(" (%s)", timeStr))
+			}
+			if e.Duration > 0 && e.Duration != 60 {
+				sb.WriteString(fmt.Sprintf(" [%d分鐘]", e.Duration))
+			}
+			sb.WriteString("\n")
+		}
+		sb.WriteString("\n")
+	}
+
+	// 2. Todos with due date in range
+	todos, err := h.repos.Todo.GetByUserID(ctx, msg.From.ID, false)
+	if err == nil {
+		var relevantTodos []*models.Todo
+		for _, t := range todos {
+			if t.DueTime != nil && !t.DueTime.Before(startTime) && t.DueTime.Before(endTime) {
+				relevantTodos = append(relevantTodos, t)
+			}
+		}
+		if len(relevantTodos) > 0 {
+			sb.WriteString("【待辦事項】\n")
+			for _, t := range relevantTodos {
+				timeStr := ""
+				if t.DueTime != nil {
+					timeStr = t.DueTime.Format("15:04")
+				}
+				sb.WriteString(fmt.Sprintf("• [#%d] %s", t.TodoID, t.Title))
+				if timeStr != "" {
+					sb.WriteString(fmt.Sprintf(" (截止: %s)", timeStr))
+				}
+				sb.WriteString("\n")
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// 3. Reminders in date range
+	reminders, err := h.repos.Reminder.GetByUserID(ctx, msg.From.ID)
+	if err == nil {
+		var relevantReminders []*models.Reminder
+		for _, r := range reminders {
+			if r.Enabled && r.RemindAt != nil && !r.RemindAt.Before(startTime) && r.RemindAt.Before(endTime) {
+				relevantReminders = append(relevantReminders, r)
+			}
+		}
+		if len(relevantReminders) > 0 {
+			sb.WriteString("【提醒】\n")
+			for _, r := range relevantReminders {
+				timeStr := r.RemindAt.Format("15:04")
+				sb.WriteString(fmt.Sprintf("• [#%d] %s (%s)\n", r.ReminderID, r.Messages, timeStr))
+			}
+			sb.WriteString("\n")
+		}
+	}
+
+	// Build result
+	scheduleData := sb.String()
+	if scheduleData == "" {
+		scheduleData = "這段時間沒有安排任何事項。"
+	}
+
+	// Format date range for display
+	dateRangeStr := ""
+	if startTime.Format("2006-01-02") == endTime.Add(-time.Second).Format("2006-01-02") {
+		dateRangeStr = startTime.Format("2006-01-02")
+	} else {
+		dateRangeStr = fmt.Sprintf("%s ~ %s", startTime.Format("2006-01-02"), endTime.Add(-time.Second).Format("2006-01-02"))
+	}
+
+	// Use AI to generate a friendly response
+	if h.ai != nil {
+		response, err := h.ai.FormatQueryResult(ctx, "行程查詢", dateRangeStr, scheduleData)
+		if err == nil && response != "" {
+			if sendMsg {
+				h.sendMessage(msg.Chat.ID, response)
+			}
+			return response
+		}
+	}
+
+	// Fallback: return raw data
+	result := fmt.Sprintf("%s %s 的行程：\n\n%s", getDateEmoji(startTime), dateRangeStr, scheduleData)
+	if sendMsg {
+		h.sendMessage(msg.Chat.ID, result)
+	}
+	return result
+}
+
+// getDateEmoji returns a calendar emoji for the day of month (1-31)
+func getDateEmoji(t time.Time) string {
+	dayEmojis := map[int]string{
+		1: "📅", 2: "📅", 3: "📅", 4: "📅", 5: "📅",
+		6: "📅", 7: "📅", 8: "📅", 9: "📅", 10: "📅",
+		11: "📅", 12: "📅", 13: "📅", 14: "📅", 15: "📅",
+		16: "📅", 17: "📅", 18: "📅", 19: "📅", 20: "📅",
+		21: "📅", 22: "📅", 23: "📅", 24: "📅", 25: "📅",
+		26: "📅", 27: "📅", 28: "📅", 29: "📅", 30: "📅",
+		31: "📅",
+	}
+	// Try to use keycap number emojis for the day
+	day := t.Day()
+	numberEmojis := []string{"0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"}
+
+	if day < 10 {
+		return numberEmojis[day]
+	}
+	// For 10-31, combine two digits
+	tens := day / 10
+	ones := day % 10
+	return numberEmojis[tens] + numberEmojis[ones]
+
+	// Fallback
+	if emoji, ok := dayEmojis[day]; ok {
+		return emoji
+	}
+	return "📅"
 }
 
 func parseDateTime(s string) *time.Time {

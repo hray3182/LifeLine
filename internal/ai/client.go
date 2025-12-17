@@ -57,6 +57,8 @@ type Intent struct {
 	Actions []ActionItem `json:"actions,omitempty"`
 	// Confirmation options (for ambiguous cases like date confirmation)
 	ConfirmationOptions []ConfirmationOption `json:"confirmation_options,omitempty"`
+	// Tool result handling
+	ReturnResultToAI bool `json:"return_result_to_ai"` // 結果返回給 AI 處理，而非直接給用戶
 }
 
 // Message represents a chat message for multi-turn conversations
@@ -65,7 +67,12 @@ type Message struct {
 	Content string `json:"content"`
 }
 
-const systemPromptTemplate = `你是 LifeLine 的智慧助理，負責解析用戶的自然語言輸入並轉換為結構化的意圖。
+const systemPromptTemplate = `你是 LifeLine，一個專業的個人生活助理。你的職責是協助用戶高效管理日常事務，包括行程安排、待辦事項、提醒、備忘錄和財務記錄。
+
+回覆風格：
+- 簡潔專業，不使用 emoji
+- 直接切入重點，避免冗長的客套話
+- 主動提供有用的資訊和建議
 
 當前時間: %s
 
@@ -87,14 +94,18 @@ const systemPromptTemplate = `你是 LifeLine 的智慧助理，負責解析用�
 - delete_transaction: 刪除交易記錄
 - get_balance: 查看收支統計
 - create_event: 建立事件
-- list_event: 列出事件 (可帶 keyword 搜尋)
+- list_event: 列出事件 (可帶 keyword 搜尋，或用 date/start_date/end_date 篩選日期)
 - delete_event: 刪除事件
 - update_event: 更新事件
+- query_schedule: 查詢行程（用於「明天要幹嘛」「這週有什麼事」等問題，會搜尋事件、待辦、提醒）
 - unknown: 無法識別
 
 根據 action 類型，parameters 可能包含：
 - id: 項目編號 (用於刪除、更新、完成操作)
 - keyword: 搜尋關鍵字 (用於 list_* 操作，搜尋標題、內容、描述、標籤)
+- date: 指定日期篩選 (用於 list_event，格式: YYYY-MM-DD)
+- start_date: 日期範圍起始 (用於 list_event，格式: YYYY-MM-DD)
+- end_date: 日期範圍結束 (用於 list_event，格式: YYYY-MM-DD)
 - content: 內容 (memo, reminder)
 - title: 標題 (todo, event)
 - description: 描述
@@ -111,7 +122,12 @@ const systemPromptTemplate = `你是 LifeLine 的智慧助理，負責解析用�
    - 當用戶使用相對時間（如「明天」、「下週一」、「3 小時後」），請根據當前時間計算出具體的日期時間
    - 輸出格式: YYYY-MM-DD HH:MM
    - 重要：「明天」= 當前日期 + 1 天，「今天」= 當前日期
-   - 深夜特別規則 (00:00-05:59)：如果當前時間在凌晨，用戶說「明天晚上」很可能是指「今晚」（同一個日曆日），此時必須設定 needs_confirmation = true 並詢問確認具體日期
+   - 明確日期不需確認：「18號」、「12/18」、「下週三」等明確指定的日期，直接使用，不需要確認
+   - 深夜特別規則 (00:00-05:59)：僅當用戶使用「明天」、「今天」這類相對詞彙時才需要確認
+     * 「明天」在凌晨可能有歧義，需要確認
+     * 「18號」、「12/18」是明確日期，不需要確認
+     * 範例：凌晨 01:57 時用戶說「明天的行程」→ 需要確認
+     * 範例：凌晨 01:57 時用戶說「18號的行程」→ 不需確認，直接查 12/18
 
 2. RFC 5545 RRULE 重複規則（用於 create_reminder 和 create_event）：
    - 格式: FREQ=頻率;其他參數
@@ -140,7 +156,7 @@ const systemPromptTemplate = `你是 LifeLine 的智慧助理，負責解析用�
 3. 以下情況必須設定 needs_confirmation = true：
    - 刪除操作 (delete_*)：任何刪除都需要確認
    - 更新操作 (update_*)：任何更新都需要確認
-   - 深夜時間模糊：當前時間在 00:00-05:59 之間，且用戶提到「明天」、「今晚」、「晚上」等詞時，必須確認具體日期
+   - 深夜時間模糊：當前時間在 00:00-05:59 之間，且用戶提到「明天」、「今天」等相對時間詞彙時，必須確認具體日期（包括查詢行程 query_schedule 和列出事件 list_event）
    - 金額較大：支出或收入超過 10000 時需要確認
 
 4. 確認選項 (confirmation_options)：
@@ -170,12 +186,36 @@ const systemPromptTemplate = `你是 LifeLine 的智慧助理，負責解析用�
    - 用戶說「記一筆花費」但沒有說金額 → 追問「請問花了多少錢？」
    - 用戶說「提醒我」但沒說時間和內容 → 追問「請問要提醒什麼？什麼時候提醒？」
 
-6. 當收到工具執行結果時，你需要：
-   - 解讀結果並組織成友善的回覆
-   - 如果結果需要用戶選擇（如搜尋到多筆記錄），引導用戶選擇
-   - 如果操作失敗，解釋原因並建議下一步
+   重要：刪除/更新操作的 ID 處理：
+   - 絕對不要猜測或編造 ID！ID 必須是數字，且來自：
+     1. 對話歷史中之前列出的項目（如之前查詢行程時顯示的 ID）
+     2. 用戶明確提供的編號
+   - 如果對話歷史中有相關項目列表，從中提取真實 ID
+   - 如果對話歷史中沒有相關列表，使用 return_result_to_ai=true 先查詢
+   - 範例：
+     * 用戶說「刪掉下午的考試」但對話中沒有列表
+     * 設定 action=list_event, parameters={keyword: "考試"}, return_result_to_ai=true
+     * 系統執行查詢，結果返回給你
+     * 你看到結果「[#5] 考試 13:20」「[#6] 演算法考試 13:30」
+     * 然後設定 action=delete_event, needs_confirmation=true, confirmation_options 提供選項
+   - 錯誤示範：使用 "exam_13_20" 這種編造的 ID
 
-7. 多操作規則：
+6. 當收到工具執行結果時（訊息以 [工具執行結果] 開頭）：
+   - 解讀結果並組織成友善的回覆
+   - 如果結果需要用戶選擇（如搜尋到多筆記錄），使用 confirmation_options 提供選項
+   - 如果操作失敗，解釋原因並建議下一步
+   - 注意：此時不要再設定 return_result_to_ai=true，避免無限迴圈
+
+7. return_result_to_ai 使用時機：
+   - 當需要先查詢再根據結果決定下一步時設為 true
+   - 例如：用戶說「刪掉下午的考試」但沒有 ID
+     → 設定 action=list_event, return_result_to_ai=true
+     → 系統執行查詢，結果返回給你
+     → 你根據查詢結果（含真實 ID）生成 confirmation_options
+   - 查詢結果直接給用戶時設為 false（預設）
+   - 重要：收到 [工具執行結果] 後，不要再設 return_result_to_ai=true
+
+8. 多操作規則：
    - 當用戶請求需要多個操作時（如「把待辦改成事件」、「刪除這個然後建立那個」），使用 actions 陣列
    - actions 中的操作會依序執行，每個操作的結果會回傳給你
    - 使用 actions 時，action 欄位應設為 "multi_action"
@@ -208,8 +248,8 @@ var intentSchema = json.RawMessage(`{
 	"properties": {
 		"action": {
 			"type": "string",
-			"enum": ["create_memo", "list_memo", "delete_memo", "create_todo", "list_todo", "complete_todo", "delete_todo", "update_todo", "create_reminder", "list_reminder", "delete_reminder", "create_expense", "create_income", "list_transaction", "delete_transaction", "get_balance", "create_event", "list_event", "delete_event", "update_event", "multi_action", "unknown"],
-			"description": "The action to perform. Use multi_action when multiple operations are needed."
+			"enum": ["create_memo", "list_memo", "delete_memo", "create_todo", "list_todo", "complete_todo", "delete_todo", "update_todo", "create_reminder", "list_reminder", "delete_reminder", "create_expense", "create_income", "list_transaction", "delete_transaction", "get_balance", "create_event", "list_event", "delete_event", "update_event", "query_schedule", "multi_action", "unknown"],
+			"description": "The action to perform. Use multi_action when multiple operations are needed. Use query_schedule when user asks about their schedule."
 		},
 		"entity": {
 			"type": "string",
@@ -295,6 +335,10 @@ var intentSchema = json.RawMessage(`{
 				"additionalProperties": false
 			},
 			"description": "Array of actions to execute sequentially when action is multi_action"
+		},
+		"return_result_to_ai": {
+			"type": "boolean",
+			"description": "Set true to return tool result to AI for further processing instead of sending directly to user. Use when you need to see query results before deciding next action."
 		}
 	},
 	"required": ["action", "confidence", "needs_confirmation", "need_more_info"],
@@ -366,6 +410,22 @@ func (c *Client) GenerateResponse(ctx context.Context, systemMsg, userMsg string
 	}
 
 	return resp.Choices[0].Message.Content, nil
+}
+
+const formatQueryResultPrompt = `你是 LifeLine，專業的個人生活助理。將查詢結果清晰呈現給用戶。
+
+規則：
+1. 用繁體中文回覆
+2. 簡潔專業，不使用 emoji
+3. 保留每個項目的 ID（格式如 #5）
+4. 按時間順序排列
+5. 如有需要注意的事項（時間衝突、截止日期臨近等），簡短提醒`
+
+// FormatQueryResult formats query results in a user-friendly way
+func (c *Client) FormatQueryResult(ctx context.Context, queryType, dateRange, rawData string) (string, error) {
+	prompt := fmt.Sprintf("查詢類型: %s\n日期範圍: %s\n\n查詢結果:\n%s", queryType, dateRange, rawData)
+
+	return c.GenerateResponse(ctx, formatQueryResultPrompt, prompt)
 }
 
 // ParseIntentWithHistory parses intent using conversation history for multi-turn conversations
