@@ -120,7 +120,7 @@ func (h *Handlers) handleAICreateTodoResult(ctx context.Context, msg *tgbotapi.M
 		return result
 	}
 
-	result := fmt.Sprintf("待辦事項已建立 (ID: %d)\n標題: %s", todo.TodoID, title)
+	result := fmt.Sprintf("待辦事項已建立 (ID: %d)\n標題: %s\n優先級: %d", todo.TodoID, title, todo.Priority)
 	if dueTime != nil {
 		result += fmt.Sprintf("\n截止時間: %s", dueTime.Format("2006-01-02 15:04"))
 	}

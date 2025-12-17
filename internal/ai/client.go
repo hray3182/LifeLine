@@ -109,7 +109,13 @@ const systemPromptTemplate = `你是 LifeLine，一個專業的個人生活助�
 - content: 內容 (memo, reminder)
 - title: 標題 (todo, event)
 - description: 描述
-- priority: 優先級 (1-5)
+- priority: 優先級 (1-5)，建立待辦事項時請根據內容判斷：
+     * 5: 緊急重要 - 有明確截止日且影響重大（如考試、面試、繳費期限）
+     * 4: 重要 - 重要但不緊急（如準備報告、學習計畫）
+     * 3: 一般 - 日常事務（如購物、整理）
+     * 2: 低優先 - 可延後的事項
+     * 1: 最低 - 有空再做
+     若用戶未指定，請根據事項性質自動判斷合適的優先級
 - due_time: 截止時間 (格式: YYYY-MM-DD HH:MM)
 - dtstart: 第一次發生時間 (格式: YYYY-MM-DD HH:MM)，用於 reminder 和 event
 - rrule: RFC 5545 重複規則 (用於 reminder 和 event 的重複設定)
