@@ -17,13 +17,14 @@ import (
 )
 
 type Repositories struct {
-	User        *repository.UserRepository
-	Memo        *repository.MemoRepository
-	Todo        *repository.TodoRepository
-	Reminder    *repository.ReminderRepository
-	Category    *repository.CategoryRepository
-	Transaction *repository.TransactionRepository
-	Event       *repository.EventRepository
+	User         *repository.UserRepository
+	Memo         *repository.MemoRepository
+	Todo         *repository.TodoRepository
+	Reminder     *repository.ReminderRepository
+	Category     *repository.CategoryRepository
+	Transaction  *repository.TransactionRepository
+	Event        *repository.EventRepository
+	UserSettings *repository.UserSettingsRepository
 }
 
 type Handlers struct {
@@ -107,6 +108,8 @@ func (h *Handlers) HandleCommand(ctx context.Context, msg *tgbotapi.Message) {
 		h.handleEvent(ctx, msg)
 	case "events":
 		h.handleEventList(ctx, msg)
+	case "settings":
+		h.handleSettings(ctx, msg)
 	default:
 		h.sendMessage(msg.Chat.ID, "未知指令，請使用 /help 查看可用指令")
 	}
@@ -145,6 +148,12 @@ func (h *Handlers) HandleCallbackQuery(ctx context.Context, callback *tgbotapi.C
 	// Handle reminder acknowledgement separately (different format)
 	if action == "remind_ack" {
 		h.handleReminderAcknowledge(ctx, callback, parts[1])
+		return
+	}
+
+	// Handle settings callbacks (different format: settings:action:...)
+	if action == "settings" {
+		h.handleSettingsCallback(ctx, callback, parts[1:])
 		return
 	}
 
@@ -330,17 +339,20 @@ func (h *Handlers) handleStart(ctx context.Context, msg *tgbotapi.Message) {
 
 我可以幫你：
 📝 管理備忘錄
-✅ 追蹤待辦事項
+✅ 追蹤待辦事項（自動提醒快到期的任務）
 ⏰ 設定提醒
 💰 記錄收支
 📅 管理行事曆
+☀️ 每日摘要（每天早上發送今日行程）
 
 你可以直接用自然語言告訴我你想做什麼，例如：
-• "記一下明天要開會"
-• "幫我記帳 午餐 150 元"
+• "幫我記一下明天要開會"
+• "新增待辦：完成報告，截止週五"
 • "提醒我下午 3 點喝水"
+• "午餐花了 150 元"
 
-使用 /help 查看所有指令`, msg.From.FirstName)
+使用 /help 查看所有指令
+使用 /settings 調整提醒設定`, msg.From.FirstName)
 	h.sendMessage(msg.Chat.ID, text)
 }
 
@@ -355,6 +367,7 @@ func (h *Handlers) handleHelp(ctx context.Context, msg *tgbotapi.Message) {
 /todo <標題> - 新增待辦
 /todos - 查看待辦列表
 /done <編號> - 完成待辦
+• 設定截止時間的待辦會自動提醒
 
 **提醒**
 /remind <時間> <訊息> - 設定提醒
@@ -368,6 +381,12 @@ func (h *Handlers) handleHelp(ctx context.Context, msg *tgbotapi.Message) {
 **行事曆**
 /event <標題> <時間> - 新增事件
 /events - 查看近期事件
+
+**設定**
+/settings - 調整提醒設定
+• Todo 提醒開關與頻率
+• 每日摘要時間
+• 勿擾時段
 
 💡 你也可以直接用自然語言告訴我！`
 	h.sendMessage(msg.Chat.ID, text)

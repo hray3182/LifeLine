@@ -68,9 +68,10 @@ func main() {
 	reminderRepo := repository.NewReminderRepository(db)
 	eventRepo := repository.NewEventRepository(db)
 	todoRepo := repository.NewTodoRepository(db)
+	userSettingsRepo := repository.NewUserSettingsRepository(db)
 
 	// Create and start scheduler
-	sched := scheduler.New(tgAPI, reminderRepo, eventRepo, todoRepo)
+	sched := scheduler.New(tgAPI, reminderRepo, eventRepo, todoRepo, userSettingsRepo)
 	go sched.Start(ctx)
 
 	// Create and start bot

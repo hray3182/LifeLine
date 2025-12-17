@@ -182,6 +182,30 @@ func (r *EventRepository) Search(ctx context.Context, userID int64, keyword stri
 	return r.scanEvents(rows)
 }
 
+func (r *EventRepository) GetTodayEvents(ctx context.Context, userID int64) ([]*models.Event, error) {
+	now := time.Now()
+	startOfDay := time.Date(now.Year(), now.Month(), now.Day(), 0, 0, 0, 0, now.Location())
+	endOfDay := startOfDay.Add(24 * time.Hour)
+
+	rows, err := r.db.Pool.Query(ctx,
+		`SELECT event_id, user_id, title, description, dtstart, duration, next_occurrence,
+		 notification_minutes, recurrence_rule, tags, notified_at, created_at
+		 FROM event WHERE user_id = $1
+		 AND (
+		   (next_occurrence >= $2 AND next_occurrence < $3)
+		   OR (next_occurrence IS NULL AND dtstart >= $2 AND dtstart < $3)
+		 )
+		 ORDER BY COALESCE(next_occurrence, dtstart) ASC`,
+		userID, startOfDay, endOfDay,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	return r.scanEvents(rows)
+}
+
 func (r *EventRepository) scanEvents(rows interface {
 	Next() bool
 	Scan(dest ...any) error

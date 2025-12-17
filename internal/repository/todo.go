@@ -26,7 +26,7 @@ func (r *TodoRepository) Create(ctx context.Context, todo *models.Todo) error {
 }
 
 func (r *TodoRepository) GetByUserID(ctx context.Context, userID int64, includeCompleted bool) ([]*models.Todo, error) {
-	query := `SELECT todo_id, user_id, title, priority, description, due_time, completed_at, tags, created_at
+	query := `SELECT todo_id, user_id, title, priority, description, due_time, completed_at, tags, created_at, last_notified_at
 		 FROM todo WHERE user_id = $1`
 	if !includeCompleted {
 		query += ` AND completed_at IS NULL`
@@ -43,7 +43,7 @@ func (r *TodoRepository) GetByUserID(ctx context.Context, userID int64, includeC
 	for rows.Next() {
 		todo := &models.Todo{}
 		if err := rows.Scan(&todo.TodoID, &todo.UserID, &todo.Title, &todo.Priority,
-			&todo.Description, &todo.DueTime, &todo.CompletedAt, &todo.Tags, &todo.CreatedAt); err != nil {
+			&todo.Description, &todo.DueTime, &todo.CompletedAt, &todo.Tags, &todo.CreatedAt, &todo.LastNotifiedAt); err != nil {
 			return nil, err
 		}
 		todos = append(todos, todo)
@@ -54,11 +54,11 @@ func (r *TodoRepository) GetByUserID(ctx context.Context, userID int64, includeC
 func (r *TodoRepository) GetByID(ctx context.Context, todoID int, userID int64) (*models.Todo, error) {
 	todo := &models.Todo{}
 	err := r.db.Pool.QueryRow(ctx,
-		`SELECT todo_id, user_id, title, priority, description, due_time, completed_at, tags, created_at
+		`SELECT todo_id, user_id, title, priority, description, due_time, completed_at, tags, created_at, last_notified_at
 		 FROM todo WHERE todo_id = $1 AND user_id = $2`,
 		todoID, userID,
 	).Scan(&todo.TodoID, &todo.UserID, &todo.Title, &todo.Priority,
-		&todo.Description, &todo.DueTime, &todo.CompletedAt, &todo.Tags, &todo.CreatedAt)
+		&todo.Description, &todo.DueTime, &todo.CompletedAt, &todo.Tags, &todo.CreatedAt, &todo.LastNotifiedAt)
 	if err != nil {
 		return nil, err
 	}
@@ -102,7 +102,7 @@ func (r *TodoRepository) Delete(ctx context.Context, todoID int, userID int64) e
 func (r *TodoRepository) GetDueSoon(ctx context.Context, userID int64, within time.Duration) ([]*models.Todo, error) {
 	deadline := time.Now().Add(within)
 	rows, err := r.db.Pool.Query(ctx,
-		`SELECT todo_id, user_id, title, priority, description, due_time, completed_at, tags, created_at
+		`SELECT todo_id, user_id, title, priority, description, due_time, completed_at, tags, created_at, last_notified_at
 		 FROM todo WHERE user_id = $1 AND completed_at IS NULL AND due_time IS NOT NULL AND due_time <= $2
 		 ORDER BY due_time ASC`,
 		userID, deadline,
@@ -116,7 +116,7 @@ func (r *TodoRepository) GetDueSoon(ctx context.Context, userID int64, within ti
 	for rows.Next() {
 		todo := &models.Todo{}
 		if err := rows.Scan(&todo.TodoID, &todo.UserID, &todo.Title, &todo.Priority,
-			&todo.Description, &todo.DueTime, &todo.CompletedAt, &todo.Tags, &todo.CreatedAt); err != nil {
+			&todo.Description, &todo.DueTime, &todo.CompletedAt, &todo.Tags, &todo.CreatedAt, &todo.LastNotifiedAt); err != nil {
 			return nil, err
 		}
 		todos = append(todos, todo)
@@ -125,7 +125,7 @@ func (r *TodoRepository) GetDueSoon(ctx context.Context, userID int64, within ti
 }
 
 func (r *TodoRepository) Search(ctx context.Context, userID int64, keyword string, includeCompleted bool) ([]*models.Todo, error) {
-	query := `SELECT todo_id, user_id, title, priority, description, due_time, completed_at, tags, created_at
+	query := `SELECT todo_id, user_id, title, priority, description, due_time, completed_at, tags, created_at, last_notified_at
 		 FROM todo WHERE user_id = $1 AND (title ILIKE $2 OR description ILIKE $2 OR tags ILIKE $2)`
 	if !includeCompleted {
 		query += ` AND completed_at IS NULL`
@@ -142,10 +142,65 @@ func (r *TodoRepository) Search(ctx context.Context, userID int64, keyword strin
 	for rows.Next() {
 		todo := &models.Todo{}
 		if err := rows.Scan(&todo.TodoID, &todo.UserID, &todo.Title, &todo.Priority,
-			&todo.Description, &todo.DueTime, &todo.CompletedAt, &todo.Tags, &todo.CreatedAt); err != nil {
+			&todo.Description, &todo.DueTime, &todo.CompletedAt, &todo.Tags, &todo.CreatedAt, &todo.LastNotifiedAt); err != nil {
 			return nil, err
 		}
 		todos = append(todos, todo)
 	}
 	return todos, nil
+}
+
+// GetTodosForNotification retrieves all incomplete todos with due_time within 7 days for a user
+func (r *TodoRepository) GetTodosForNotification(ctx context.Context, userID int64) ([]*models.Todo, error) {
+	// Get todos that are:
+	// 1. Not completed
+	// 2. Have a due_time
+	// 3. Due within 7 days (or already overdue)
+	sevenDaysLater := time.Now().Add(7 * 24 * time.Hour)
+	rows, err := r.db.Pool.Query(ctx,
+		`SELECT todo_id, user_id, title, priority, description, due_time, completed_at, tags, created_at, last_notified_at
+		 FROM todo
+		 WHERE user_id = $1
+		   AND completed_at IS NULL
+		   AND due_time IS NOT NULL
+		   AND due_time <= $2
+		 ORDER BY due_time ASC`,
+		userID, sevenDaysLater,
+	)
+	if err != nil {
+		return nil, err
+	}
+	defer rows.Close()
+
+	var todos []*models.Todo
+	for rows.Next() {
+		todo := &models.Todo{}
+		if err := rows.Scan(&todo.TodoID, &todo.UserID, &todo.Title, &todo.Priority,
+			&todo.Description, &todo.DueTime, &todo.CompletedAt, &todo.Tags, &todo.CreatedAt, &todo.LastNotifiedAt); err != nil {
+			return nil, err
+		}
+		todos = append(todos, todo)
+	}
+	return todos, nil
+}
+
+// SetLastNotifiedAt updates the last notification time for a todo
+func (r *TodoRepository) SetLastNotifiedAt(ctx context.Context, todoID int, t *time.Time) error {
+	_, err := r.db.Pool.Exec(ctx,
+		`UPDATE todo SET last_notified_at = $1 WHERE todo_id = $2`,
+		t, todoID,
+	)
+	return err
+}
+
+// BatchSetLastNotifiedAt updates the last notification time for multiple todos
+func (r *TodoRepository) BatchSetLastNotifiedAt(ctx context.Context, todoIDs []int, t *time.Time) error {
+	if len(todoIDs) == 0 {
+		return nil
+	}
+	_, err := r.db.Pool.Exec(ctx,
+		`UPDATE todo SET last_notified_at = $1 WHERE todo_id = ANY($2)`,
+		t, todoIDs,
+	)
+	return err
 }

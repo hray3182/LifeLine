@@ -25,13 +25,14 @@ func New(token string, db *database.DB, aiClient *ai.Client, devMode bool) (*Bot
 	}
 
 	repos := &handlers.Repositories{
-		User:        repository.NewUserRepository(db),
-		Memo:        repository.NewMemoRepository(db),
-		Todo:        repository.NewTodoRepository(db),
-		Reminder:    repository.NewReminderRepository(db),
-		Category:    repository.NewCategoryRepository(db),
-		Transaction: repository.NewTransactionRepository(db),
-		Event:       repository.NewEventRepository(db),
+		User:         repository.NewUserRepository(db),
+		Memo:         repository.NewMemoRepository(db),
+		Todo:         repository.NewTodoRepository(db),
+		Reminder:     repository.NewReminderRepository(db),
+		Category:     repository.NewCategoryRepository(db),
+		Transaction:  repository.NewTransactionRepository(db),
+		Event:        repository.NewEventRepository(db),
+		UserSettings: repository.NewUserSettingsRepository(db),
 	}
 
 	return &Bot{
