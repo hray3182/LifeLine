@@ -334,6 +334,7 @@ func (s *Scheduler) checkUserTodos(ctx context.Context, userID int64, now time.T
 // shouldNotifyTodo determines if a todo should be notified based on time and priority
 func (s *Scheduler) shouldNotifyTodo(todo *models.Todo, settings *models.UserSettings, now time.Time) (bool, string) {
 	if todo.DueTime == nil {
+		log.Printf("[DEBUG] Todo %d (%s): skipped - no due time", todo.TodoID, todo.Title)
 		return false, ""
 	}
 
@@ -347,20 +348,22 @@ func (s *Scheduler) shouldNotifyTodo(todo *models.Todo, settings *models.UserSet
 	case timeUntilDue < 0: // Overdue
 		zone = "overdue"
 		baseIntervalMinutes = settings.ReminderIntervals.Overdue
-	case timeUntilDue < 2*time.Hour: // Urgent: within 2 hours
+	case timeUntilDue <= 2*time.Hour: // Urgent: within 2 hours (inclusive)
 		zone = "urgent"
 		baseIntervalMinutes = settings.ReminderIntervals.Urgent
-	case timeUntilDue < 24*time.Hour: // Soon: within 24 hours
+	case timeUntilDue <= 24*time.Hour: // Soon: within 24 hours (inclusive)
 		zone = "soon"
 		baseIntervalMinutes = settings.ReminderIntervals.Soon
-	case timeUntilDue < 7*24*time.Hour: // Normal: within 7 days
+	case timeUntilDue <= 7*24*time.Hour: // Normal: within 7 days (inclusive)
 		zone = "normal"
 		baseIntervalMinutes = settings.ReminderIntervals.Normal
 	default:
+		log.Printf("[DEBUG] Todo %d (%s): skipped - too far away (%.1f days)", todo.TodoID, todo.Title, timeUntilDue.Hours()/24)
 		return false, "" // Too far away
 	}
 
 	if baseIntervalMinutes <= 0 {
+		log.Printf("[DEBUG] Todo %d (%s): skipped - zone=%s has interval=0 (disabled)", todo.TodoID, todo.Title, zone)
 		return false, ""
 	}
 
@@ -374,10 +377,19 @@ func (s *Scheduler) shouldNotifyTodo(todo *models.Todo, settings *models.UserSet
 
 	// Check if enough time has passed since last notification
 	if todo.LastNotifiedAt == nil {
+		log.Printf("[DEBUG] Todo %d (%s): WILL NOTIFY - zone=%s, interval=%dm, never notified before", todo.TodoID, todo.Title, zone, intervalMinutes)
 		return true, zone
 	}
 
-	return now.Sub(*todo.LastNotifiedAt) >= interval, zone
+	timeSinceLastNotify := now.Sub(*todo.LastNotifiedAt)
+	shouldNotify := timeSinceLastNotify >= interval
+	if shouldNotify {
+		log.Printf("[DEBUG] Todo %d (%s): WILL NOTIFY - zone=%s, interval=%dm, last notified %.1fm ago", todo.TodoID, todo.Title, zone, intervalMinutes, timeSinceLastNotify.Minutes())
+	} else {
+		log.Printf("[DEBUG] Todo %d (%s): skipped - zone=%s, interval=%dm, last notified %.1fm ago (cooldown: %.1fm remaining)", todo.TodoID, todo.Title, zone, intervalMinutes, timeSinceLastNotify.Minutes(), (interval - timeSinceLastNotify).Minutes())
+	}
+
+	return shouldNotify, zone
 }
 
 // getPriorityMultiplier returns the interval multiplier based on priority
