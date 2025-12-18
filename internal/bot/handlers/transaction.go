@@ -66,7 +66,7 @@ func (h *Handlers) handleTransaction(ctx context.Context, msg *tgbotapi.Message,
 		typeStr = "收入"
 	}
 
-	h.sendMessage(msg.Chat.ID, fmt.Sprintf("%s %s已記錄\n金額: %.2f\n說明: %s",
+	h.sendMessage(msg.Chat.ID, fmt.Sprintf("%s %s已記錄\n金額: %.0f\n說明: %s",
 		emoji, typeStr, amount, description))
 }
 
@@ -98,15 +98,15 @@ func (h *Handlers) handleBalanceWithResult(ctx context.Context, msg *tgbotapi.Me
 
 	var sb strings.Builder
 	sb.WriteString(fmt.Sprintf("📊 **%d年%d月 收支統計**\n\n", now.Year(), now.Month()))
-	sb.WriteString(fmt.Sprintf("💰 收入: %.2f\n", income))
-	sb.WriteString(fmt.Sprintf("💸 支出: %.2f\n", expense))
+	sb.WriteString(fmt.Sprintf("💰 收入: %.0f\n", income))
+	sb.WriteString(fmt.Sprintf("💸 支出: %.0f\n", expense))
 	sb.WriteString(fmt.Sprintf("━━━━━━━━━━\n"))
 
 	balanceEmoji := "📈"
 	if balance < 0 {
 		balanceEmoji = "📉"
 	}
-	sb.WriteString(fmt.Sprintf("%s 結餘: %.2f", balanceEmoji, balance))
+	sb.WriteString(fmt.Sprintf("%s 結餘: %.0f", balanceEmoji, balance))
 
 	result := sb.String()
 	h.sendMessage(msg.Chat.ID, result)
