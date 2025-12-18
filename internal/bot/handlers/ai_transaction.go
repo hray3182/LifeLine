@@ -63,7 +63,7 @@ func (h *Handlers) handleAIListTransactionResult(ctx context.Context, msg *tgbot
 			dateStr = tx.TransactionDate.Format("01/02")
 		}
 
-		sb.WriteString(fmt.Sprintf("[%s] %d. %.2f", typeStr, tx.TransactionID, tx.Amount))
+		sb.WriteString(fmt.Sprintf("[%s] %d. %.0f", typeStr, tx.TransactionID, tx.Amount))
 		if tx.Description != "" {
 			desc := tx.Description
 			if len(desc) > 20 {
@@ -127,7 +127,7 @@ func (h *Handlers) handleAICreateTransactionResult(ctx context.Context, msg *tgb
 		typeStr = "收入"
 	}
 
-	result := fmt.Sprintf("%s已記錄 (ID: %d)\n金額: %.2f", typeStr, tx.TransactionID, amount)
+	result := fmt.Sprintf("%s已記錄 (ID: %d)\n金額: %.0f", typeStr, tx.TransactionID, amount)
 	if description != "" {
 		result += fmt.Sprintf("\n說明: %s", description)
 	}
